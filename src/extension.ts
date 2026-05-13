@@ -74,7 +74,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 				// Montar prompt FIM e solicitar ao Ollama
 				try {
-					const completion = await client.generateWithFIM(prefix, suffix);
+					const completion = await debouncedGenerate(prefix, suffix);
 					if (completion && completion.trim()) {
 						return [new vscode.InlineCompletionItem(completion)];
 					}

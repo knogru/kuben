@@ -12,12 +12,12 @@ export interface OllamaResponse {
 export class OllamaClient {
   constructor(
     private endpoint: string = 'http://localhost:11434',
-    private model: string = 'qwen2.5-coder'
+    private model: string = 'qwen2.5-coder:1.5b'
   ) {}
 
   async generate(prompt: string): Promise<string | undefined> {
     const controller = new AbortController();
-    const timeoutMs = 600000;
+    const timeoutMs = 60000;
 
     try {
       const res = await this.postJson(`${this.endpoint}/api/generate`, {
@@ -50,12 +50,12 @@ export class OllamaClient {
   async generateWithFIM(
     prefix: string,
     suffix: string,
-    maxTokens: number = 50
+    maxTokens: number = 20
   ): Promise<string | undefined> {
     const prompt = `<|fim_prefix|>${prefix}<|fim_suffix|>${suffix}<|fim_middle|>`;
 
     const controller = new AbortController();
-    const timeoutMs = 600000;
+    const timeoutMs = 60000;
 
     try {
       const res = await this.postJson(`${this.endpoint}/api/generate`, {
@@ -63,6 +63,8 @@ export class OllamaClient {
         prompt: prompt,
         stream: false,
         num_predict: maxTokens,
+        temperature: 0.3,
+        top_p: 0.9,
       }, timeoutMs, controller.signal);
 
       if (!res.ok) {
@@ -71,7 +73,7 @@ export class OllamaClient {
       }
 
       const data: OllamaResponse = await res.json();
-      return data.response;
+      return this.cleanCompletion(data.response);
     } catch (error) {
       if (error instanceof Error) {
         if (error.message === 'AbortError') {
@@ -85,6 +87,45 @@ export class OllamaClient {
       return undefined;
     }
   }
+
+  private cleanCompletion(response: string): string | undefined {
+    const lines = response.split('\n');
+    
+    const codeLines: string[] = [];
+    let foundCode = false;
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+
+      // Pular linhas em branco antes do código começar
+      if (!foundCode && trimmed === ''){
+        continue;
+      }
+
+      // Ignorar markdown code fences
+      if (trimmed.startsWith('```')) {
+        continue;
+      }
+
+      // Detectar se a linha parece prosa (começa com letra maiúscula e termina com ponto)
+      const isProse = /^[A-Z].*[.!?:]$/.test(trimmed);
+      if (isProse && !foundCode) {
+        continue;
+      }
+
+      // A partir daqui é código
+      foundCode = true;
+      codeLines.push(line);
+
+      // Parar após 5 linhas de código
+      if (codeLines.length >= 5) {
+        break;
+      }
+    }
+
+    const result = codeLines.join('\n').trimEnd();
+    return result || undefined;
+}
 
   private async postJson(urlStr: string, bodyObj: any, timeoutMs: number, signal?: AbortSignal) {
     return new Promise<{ ok: boolean; status: number; json: () => Promise<any> }>((resolve, reject) => {
