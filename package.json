@@ -9,7 +9,11 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onLanguage:javascript",
+    "onLanguage:typescript",
+    "onCommand:kuben.helloWorld"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [

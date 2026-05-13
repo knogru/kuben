@@ -1,26 +1,93 @@
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
+import { OllamaClient } from './ollamaClient';
 
-// This method is called when your extension is activated
-// Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
+  const client = new OllamaClient();
 
-	// Use the console to output diagnostic information (console.log) and errors (console.error)
-	// This line of code will only be executed once when your extension is activated
-	console.log('Congratulations, your extension "kuben" is now active!');
+	function createDebounced<T extends any[], R>(
+		fn: (...args: T) => Promise<R>,
+		delay: number
+	) {
+		let timeout: NodeJS.Timeout | null = null;
+		let pendingResolve: ((value: R | undefined) => void) | null = null;
 
-	// The command has been defined in the package.json file
-	// Now provide the implementation of the command with registerCommand
-	// The commandId parameter must match the command field in package.json
-	const disposable = vscode.commands.registerCommand('kuben.helloWorld', () => {
-		// The code you place here will be executed every time your command is executed
-		// Display a message box to the user
-		vscode.window.showInformationMessage('Hello World from kuben!');
-	});
+		return (...args: T): Promise<R | undefined> => {
+			if (timeout) {
+				clearTimeout(timeout);
+				timeout = null;
+				if (pendingResolve) {
+					pendingResolve(undefined);
+					pendingResolve = null;
+				}
+			}
 
-	context.subscriptions.push(disposable);
+			return new Promise((resolve) => {
+				pendingResolve = resolve;
+				timeout = setTimeout(async () => {
+					try {
+						const result = await fn(...args);
+						resolve(result as R | undefined);
+					} catch (e) {
+						console.error('Debounced function error:', e);
+						resolve(undefined);
+					} finally {
+						pendingResolve = null;
+						timeout = null;
+					}
+				}, delay);
+			});
+		};
+	}
+
+	const debouncedGenerate = createDebounced(
+		(prefix: string, suffix: string) => client.generateWithFIM(prefix, suffix),
+		300
+	);
+
+  const provider = vscode.languages.registerInlineCompletionItemProvider(
+    { language: 'javascript' }, // Comece com JS
+    {
+      async provideInlineCompletionItems(document, position, context, token) {
+				// Obter texto completo do arquivo
+				const fullText = document.getText();
+				
+				// Obter as linhas antes do cursor
+				const lineNumber = position.line;
+				const charPos = position.character;
+				const currentLine = document.lineAt(lineNumber).text;
+				
+				// Pegar até 50 linhas anteriores como contexto
+				const startLine = Math.max(0, lineNumber - 50);
+				const prefix = document.getText(
+					new vscode.Range(startLine, 0, lineNumber, charPos)
+				);
+				
+				// Pegar linhas após o cursor como contexto futuro
+				const endLine = Math.min(document.lineCount - 1, lineNumber + 10);
+				const suffix = document.getText(
+					new vscode.Range(lineNumber, charPos, endLine, 0)
+				);
+
+				// Log para debug
+				console.log('Prefix length:', prefix.length);
+				console.log('Current char:', currentLine[charPos]);
+
+				// Montar prompt FIM e solicitar ao Ollama
+				try {
+					const completion = await client.generateWithFIM(prefix, suffix);
+					if (completion && completion.trim()) {
+						return [new vscode.InlineCompletionItem(completion)];
+					}
+				} catch (err) {
+					console.error('Error while requesting completion:', err);
+				}
+
+				return [];
+			}
+    }
+  );
+
+  context.subscriptions.push(provider);
 }
 
-// This method is called when your extension is deactivated
 export function deactivate() {}
