@@ -1,21 +1,44 @@
 import * as vscode from 'vscode';
 import { ASTManager } from './astManager';
-// ... outros imports existentes (OllamaClient, etc.)[cite: 1]
+import { SymbolIndexer } from './symbolIndexer';
 
 export async function activate(context: vscode.ExtensionContext) {
-  console.log('[Kuben] Ativando a extensão e inicializando componentes centrais...');
+  console.log('[Kuben] Ativando a extensão e instanciando gerenciadores de contexto...');
 
-  // Inicializa o Engine AST sob a restrição de ciclo de vida seguro
   const astManager = ASTManager.getInstance();
-  const astInitSuccess = await astManager.initialize(context);
-  
-  if (astInitSuccess) {
-    console.log('[Kuben] Engine AST configurado com sucesso via WebAssembly.');
-  } else {
-    console.warn('[Kuben] Engine AST operando em modo de Fallback Estrutural.');
+  const symbolIndexer = SymbolIndexer.getInstance();
+
+  // 1. Inicializa o motor estrutural básico
+  await astManager.initialize(context);
+
+  // 2. Indexa de forma assíncrona os documentos de texto que já estão abertos no editor ativo
+  if (vscode.window.activeTextEditor) {
+    symbolIndexer.indexDocument(vscode.window.activeTextEditor.document);
   }
 
-  // ... Registro de InlineCompletionItemProvider e comandos subsequentes[cite: 1]
+  // 3. Ouvinte Incremental de Eventos do Workspace para manter o Cache O(1) sempre atualizado
+  const onSaveDisposable = vscode.workspace.onDidSaveTextDocument((document) => {
+    symbolIndexer.indexDocument(document);
+  });
+
+  const onChangeEditorDisposable = vscode.window.onDidChangeActiveTextEditor((editor) => {
+    if (editor) {
+      symbolIndexer.indexDocument(editor.document);
+    }
+  });
+
+  const onCloseDisposable = vscode.workspace.onDidCloseTextDocument((document) => {
+    symbolIndexer.removeDocument(document.uri);
+  });
+
+  // Registra os componentes descartáveis no ciclo de vida do VS Code
+  context.subscriptions.push(
+    onSaveDisposable,
+    onChangeEditorDisposable,
+    onCloseDisposable
+  );
+
+  console.log('[Kuben] Feature 02: SymbolIndexer registrado e escutando mutações de workspace.');
 }
 
 export function deactivate() {
