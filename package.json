@@ -20,19 +20,24 @@
       {
         "command": "kuben.helloWorld",
         "title": "Hello World"
-      }
-      ,
+      },
       {
         "command": "kuben.toggle",
         "title": "Toggle Kuben Autocomplete"
-      }
-      ,
+      },
       {
         "command": "kuben.cancel",
         "title": "Cancel Kuben Generation"
+      },
+      {
+        "command": "kuben.showLatency",
+        "title": "Show Kuben Latency Stats"
+      },
+      {
+        "command": "kuben.manageTelemetry",
+        "title": "Manage Kuben Telemetry & Privacy"
       }
-    ]
-    ,
+    ],
     "configuration": {
       "type": "object",
       "title": "Kuben Autocomplete Configuration",
@@ -61,6 +66,31 @@
           "type": "number",
           "default": 30,
           "description": "Number of lines of context to send as prefix."
+        },
+        "kuben.enableGraphRag": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Graph RAG (symbol-aware context injection)."
+        },
+        "kuben.useASTEngine": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable AST-based symbol indexing (DocumentSymbol MVP). Set false to use naive indexing."
+        },
+        "kuben.modelPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to a locally-tuned model file for deployment (e.g., fine-tuned GGUF)."
+        },
+        "kuben.telemetry.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable latency telemetry collection (session-scoped, no data sent externally)."
+        },
+        "kuben.telemetry.optIn": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt-in to code snippet collection for fine-tuning dataset (requires explicit user consent)."
         }
       }
     }
@@ -90,5 +120,8 @@
     "typescript": "^5.9.3",
     "@vscode/test-cli": "^0.0.12",
     "@vscode/test-electron": "^2.5.2"
+  },
+  "dependencies": {
+    "web-tree-sitter": "^0.20.0"
   }
 }

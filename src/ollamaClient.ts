@@ -26,11 +26,14 @@ export class OllamaClient {
     const timeoutMs = 60000;
 
     try {
+      const start = Date.now();
       const res = await this.postJson(`${this.endpoint}/api/generate`, {
         model: this.model,
         prompt: prompt,
         stream: false,
       }, timeoutMs, controller.signal);
+      const elapsed = Date.now() - start;
+      console.debug(`OllamaClient.generate RTT: ${elapsed}ms`);
 
       if (!res.ok) {
         console.error(`Ollama error: ${res.status}`);
@@ -68,6 +71,7 @@ export class OllamaClient {
     const timeoutMs = 60000;
 
     try {
+      const start = Date.now();
       const res = await this.postJson(`${this.endpoint}/api/generate`, {
         model: this.model,
         prompt: prompt,
@@ -76,6 +80,8 @@ export class OllamaClient {
         temperature: 0.3,
         top_p: 0.9,
       }, timeoutMs, controller.signal);
+      const elapsed = Date.now() - start;
+      console.debug(`OllamaClient.generateWithFIM RTT: ${elapsed}ms`);
 
       if (!res.ok) {
         console.error(`Ollama error: ${res.status}`);
@@ -179,6 +185,181 @@ export class OllamaClient {
         });
 
         req.on('error', (err: any) => reject(err));
+        req.on('timeout', () => {
+          req.destroy(new Error('AbortError'));
+          reject(new Error('AbortError'));
+        });
+
+        if (signal) {
+          if (signal.aborted) {
+            req.destroy(new Error('AbortError'));
+            return reject(new Error('AbortError'));
+          }
+          const onAbort = () => {
+            req.destroy(new Error('AbortError'));
+            reject(new Error('AbortError'));
+          };
+          signal.addEventListener('abort', onAbort);
+        }
+
+        req.write(data);
+        req.end();
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
+  async generateWithFIMStream(prefix: string, suffix: string, onToken: (token: string) => void, maxTokens: number = 20): Promise<void> {
+    const prompt = `<|fim_prefix|>${prefix}<|fim_suffix|>${suffix}<|fim_middle|>`;
+    if (this.abortController) {
+      this.abortController.abort();
+    }
+    this.abortController = new AbortController();
+    const controller = this.abortController;
+    const timeoutMs = 60000;
+
+    try {
+      await this.postJsonStream(
+        `${this.endpoint}/api/generate`,
+        {
+          model: this.model,
+          prompt: prompt,
+          stream: true,
+          num_predict: maxTokens,
+          temperature: 0.3,
+          top_p: 0.9,
+        },
+        timeoutMs,
+        controller.signal,
+        (message) => {
+          if (!message) return;
+          if (typeof message === 'string') {
+            onToken(message);
+            return;
+          }
+          if (message.response) {
+            onToken(message.response);
+          }
+        }
+      );
+    } catch (error) {
+      if (error instanceof Error) {
+        if (error.message === 'AbortError') {
+          console.error('FIM streaming generation failed: Request timeout (30s)');
+        } else {
+          console.error('FIM streaming generation failed:', error.message);
+        }
+      } else {
+        console.error('FIM streaming generation failed:', error);
+      }
+    }
+  }
+
+  private async postJsonStream(
+    urlStr: string,
+    bodyObj: any,
+    timeoutMs: number,
+    signal: AbortSignal | undefined,
+    onMessage: (message: any) => void
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      try {
+        const url = new URL(urlStr);
+        const lib = url.protocol === 'https:' ? require('https') : require('http');
+        const data = JSON.stringify(bodyObj);
+        const options: any = {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(data),
+          },
+          timeout: timeoutMs,
+        };
+
+        const req = lib.request(url, options, (res: any) => {
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            return reject(new Error(`Ollama error: ${res.statusCode}`));
+          }
+
+          let finished = false;
+          let buffer = '';
+          const decoder = new TextDecoder();
+
+          const flushBuffer = (isFinal = false) => {
+            while (true) {
+              const newlineIndex = buffer.indexOf('\n');
+              if (newlineIndex === -1) break;
+
+              const line = buffer.slice(0, newlineIndex).trim();
+              buffer = buffer.slice(newlineIndex + 1);
+              if (!line) continue;
+
+              let payload = line;
+              if (payload.startsWith('data:')) {
+                payload = payload.slice(5).trim();
+              }
+              if (payload === '[DONE]') {
+                if (!finished) {
+                  finished = true;
+                  resolve();
+                }
+                return;
+              }
+
+              try {
+                const parsed = JSON.parse(payload);
+                onMessage(parsed);
+                if (parsed.done) {
+                  if (!finished) {
+                    finished = true;
+                    resolve();
+                  }
+                  return;
+                }
+              } catch {
+                if (payload) {
+                  onMessage(payload);
+                }
+              }
+            }
+
+            if (isFinal && buffer.trim()) {
+              try {
+                const parsed = JSON.parse(buffer.trim());
+                onMessage(parsed);
+              } catch {
+                onMessage(buffer.trim());
+              }
+              buffer = '';
+            }
+          };
+
+          res.on('data', (chunk: any) => {
+            buffer += decoder.decode(chunk, { stream: true });
+            flushBuffer();
+          });
+
+          res.on('end', () => {
+            if (!finished) {
+              flushBuffer(true);
+              finished = true;
+              resolve();
+            }
+          });
+
+          res.on('error', (err: any) => {
+            if (!finished) {
+              finished = true;
+              reject(err);
+            }
+          });
+        });
+
+        req.on('error', (err: any) => {
+          reject(err);
+        });
+
         req.on('timeout', () => {
           req.destroy(new Error('AbortError'));
           reject(new Error('AbortError'));
