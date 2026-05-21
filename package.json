@@ -16,85 +16,27 @@
   ],
   "main": "./dist/extension.js",
   "contributes": {
-    "commands": [
-      {
-        "command": "kuben.helloWorld",
-        "title": "Hello World"
+  "configuration": {
+    "title": "Kuben Config",
+    "properties": {
+      "kuben.ollamaEndpoint": {
+        "type": "string",
+        "default": "http://localhost:11434",
+        "description": "Endpoint HTTP da sua instância local do Ollama."
       },
-      {
-        "command": "kuben.toggle",
-        "title": "Toggle Kuben Autocomplete"
+      "kuben.modelName": {
+        "type": "string",
+        "default": "qwen2.5-coder:1.5b",
+        "description": "Modelo de linguagem focado em código instalado no Ollama."
       },
-      {
-        "command": "kuben.cancel",
-        "title": "Cancel Kuben Generation"
-      },
-      {
-        "command": "kuben.showLatency",
-        "title": "Show Kuben Latency Stats"
-      },
-      {
-        "command": "kuben.manageTelemetry",
-        "title": "Manage Kuben Telemetry & Privacy"
-      }
-    ],
-    "configuration": {
-      "type": "object",
-      "title": "Kuben Autocomplete Configuration",
-      "properties": {
-        "kuben.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable or disable the Kuben inline autocomplete extension."
-        },
-        "kuben.endpoint": {
-          "type": "string",
-          "default": "http://localhost:11434",
-          "description": "Ollama server endpoint URL."
-        },
-        "kuben.model": {
-          "type": "string",
-          "default": "qwen2.5-coder:1.5b",
-          "description": "Model to use on the Ollama server."
-        },
-        "kuben.debounceDelay": {
-          "type": "number",
-          "default": 300,
-          "description": "Debounce delay (ms) before sending a completion request."
-        },
-        "kuben.contextWindow": {
-          "type": "number",
-          "default": 30,
-          "description": "Number of lines of context to send as prefix."
-        },
-        "kuben.enableGraphRag": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable Graph RAG (symbol-aware context injection)."
-        },
-        "kuben.useASTEngine": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable AST-based symbol indexing (DocumentSymbol MVP). Set false to use naive indexing."
-        },
-        "kuben.modelPath": {
-          "type": "string",
-          "default": "",
-          "description": "Optional path to a locally-tuned model file for deployment (e.g., fine-tuned GGUF)."
-        },
-        "kuben.telemetry.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable latency telemetry collection (session-scoped, no data sent externally)."
-        },
-        "kuben.telemetry.optIn": {
-          "type": "boolean",
-          "default": false,
-          "description": "Opt-in to code snippet collection for fine-tuning dataset (requires explicit user consent)."
-        }
+      "kuben.enableGraphRag": {
+        "type": "boolean",
+        "default": true,
+        "description": "Injeta metadados estruturais de arquivos vizinhos analisados pela AST no prompt FIM."
       }
     }
-  },
+  }
+},
   "scripts": {
     "vscode:prepublish": "npm run package",
     "compile": "npm run check-types && npm run lint && node esbuild.js",

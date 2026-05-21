@@ -2,44 +2,59 @@ import * as vscode from 'vscode';
 import { ASTManager } from './astManager';
 import { SymbolIndexer } from './symbolIndexer';
 import { ContextManager } from './contextManager';
+import { OllamaClient } from './ollamaClient';
 
 export async function activate(context: vscode.ExtensionContext) {
-  console.log('[Kuben] Ativando motor de inteligência contextual...');
+  console.log('[Kuben] Inicializando subsistemas...');
 
   const astManager = ASTManager.getInstance();
   const symbolIndexer = SymbolIndexer.getInstance();
   const contextManager = ContextManager.getInstance();
+  const ollamaClient = OllamaClient.getInstance();
 
   await astManager.initialize(context);
 
-  // Registra o provedor de Inline Completion do VS Code
   const inlineProvider: vscode.InlineCompletionItemProvider = {
     async provideInlineCompletionItems(document, position, context, token) {
-      // Evita disparos desnecessários se o cancelamento já foi solicitado
-      if (token.isCancellationRequested) return [];
+      if (token.isCancellationRequested) {return [];}
 
-      // Cronometragem fina para nossa telemetria de latência (Target <= 300ms)
       const requestStart = Date.now();
 
-      try {
-        // 1. Montagem do payload contextual otimizado
-        const fimContext = contextManager.buildFIMContext(document, position);
-        
-        // [LOG DE TELEMETRIA TEMPORÁRIO] Validação do pipeline de contexto
-        console.debug(`[Kuben Telemetry] Contexto preparado em ${Date.now() - requestStart}ms.`);
+      // Debounce implícito controlado pelo VS Code Inline API + Verificação de segurança
+      // Adiciona um pequeno atraso de segurança para digitação ultra rápida se necessário
+      await new Promise(resolve => setTimeout(resolve, 35));
+      if (token.isCancellationRequested) {return [];}
 
-        // 2. Stub temporário para a Feature 04 (Inference Engine)
-        // Retornará vazio até conectarmos o OllamaClient via streaming na próxima fase.
-        return [];
+      try {
+        // 1. Geração do Contexto FIM enriquecido com Grafo de Símbolos Local
+        const fimContext = contextManager.buildFIMContext(document, position);
+
+        // 2. Disparo da Inferência por Streaming Otimizado
+        const completionText = await ollamaClient.generateInlineCompletion(fimContext, token);
+
+        const totalLatency = Date.now() - requestStart;
+        console.log(`[Kuben Telemetry] Concluído em ${totalLatency}ms. Texto gerado: "${completionText.replace(/\n/g, '\\n')}"`);
+
+				latencyHistory.push(totalLatency);
+				if (latencyHistory.length > 50) {latencyHistory.shift();} // Mantém apenas os últimos 50 inputs
+
+        if (!completionText || completionText.trim().length === 0) {
+          return [];
+        }
+
+        // 3. Empacotamento do resultado no formato nativo do VS Code Editor
+        const completionRange = new vscode.Range(position, position);
+        const inlineItem = new vscode.InlineCompletionItem(completionText, completionRange);
+
+        return [inlineItem];
 
       } catch (error) {
-        console.error('[Kuben] Erro no pipeline de autocompletar:', error);
+        console.error('[Kuben Engine Error]:', error);
         return [];
       }
     }
   };
 
-  // Registra o provedor vinculando-o a todas as linguagens suportadas
   const selector = [
     { scheme: 'file', language: 'javascript' },
     { scheme: 'file', language: 'typescript' },
@@ -54,7 +69,27 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidCloseTextDocument(doc => symbolIndexer.removeDocument(doc.uri))
   );
 
-  console.log('[Kuben] Feature 03: ContextManager totalmente integrado ao InlineCompletionEngine.');
+  console.log('[Kuben Core] Extensão Kuben totalmente operacional. Pronto para autocompletar local.');
+
+	// Banco de dados em memória simples para telemetria local
+const latencyHistory: number[] = [];
+
+// Registre o comando para o usuário visualizar a performance
+context.subscriptions.push(
+  vscode.commands.registerCommand('kuben.showLatency', () => {
+    if (latencyHistory.length === 0) {
+      vscode.window.showInformationMessage('Kuben Telemetry: Nenhuma inferência executada ainda.');
+      return;
+    }
+    
+    const avg = latencyHistory.reduce((a, b) => a + b, 0) / latencyHistory.length;
+    const max = Math.max(...latencyHistory);
+    
+    vscode.window.showInformationMessage(
+      `📊 Kuben Performance — Média: ${avg.toFixed(1)}ms | Máxima: ${max}ms (Target: ≤300ms)`
+    );
+  })
+);
 }
 
 export function deactivate() {}

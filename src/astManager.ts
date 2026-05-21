@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import * as Parser from 'web-tree-sitter';
+import Parser from 'web-tree-sitter';
 
 export class ASTManager {
   private static instance: ASTManager | null = null;
@@ -9,7 +9,7 @@ export class ASTManager {
   private isInitialized: boolean = false;
   private initializationError: boolean = false;
 
-  private constructor() {}
+  private constructor() { }
 
   /**
    * Retorna a instância única do ASTManager (Singleton)
@@ -26,12 +26,15 @@ export class ASTManager {
    * Deve ser invocado exclusivamente no activate() da extensão.
    */
   public async initialize(context: vscode.ExtensionContext): Promise<boolean> {
-    if (this.isInitialized) return true;
+    if (this.isInitialized) {return true;}
 
     try {
       // Inicializa o módulo WASM base do web-tree-sitter
-      await Parser.init();
-      this.parser = new Parser();
+
+      // Força a resolução do init e construtor via instância resolvida
+      await (Parser as any).init();
+      this.parser = new (Parser as any)();
+
 
       // Mapeamento de linguagens suportadas pela extensão para seus respectivos arquivos WASM
       const languageWasmMap: Record<string, string> = {
@@ -42,7 +45,7 @@ export class ASTManager {
       };
 
       const storagePath = context.extensionPath;
-      
+
       // Carrega os binários WASM dinamicamente
       for (const [langId, wasmFile] of Object.entries(languageWasmMap)) {
         const wasmPath = path.join(storagePath, 'parsers', wasmFile);
@@ -115,8 +118,8 @@ export class ASTManager {
    * Obtém o tipo de nó sintático na posição atual do cursor para tomada de decisões heurísticas (F04)
    */
   public getNodeAtPosition(tree: Parser.Tree, position: vscode.Position): Parser.SyntaxNode | null {
-    if (!tree || (tree as any).isFallback) return null;
-    
+    if (!tree || (tree as any).isFallback) {return null;}
+
     return tree.rootNode.descendantForPosition({
       row: position.line,
       column: position.character

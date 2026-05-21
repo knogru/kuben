@@ -18,7 +18,7 @@ export interface DocumentSymbols {
 export class SymbolIndexer {
   private static instance: SymbolIndexer | null = null;
   private astManager: ASTManager;
-  
+
   // Repositório in-memory para acesso O(1) de símbolos por arquivo
   private symbolCache: Map<string, DocumentSymbols> = new Map();
 
@@ -42,17 +42,17 @@ export class SymbolIndexer {
    */
   public async indexDocument(document: vscode.TextDocument): Promise<void> {
     const enabled = vscode.workspace.getConfiguration('kuben').get<boolean>('enableGraphRag', true);
-    if (!enabled) return;
+    if (!enabled) {return;}
 
     // Filtro básico para linguagens suportadas nesta fase
     const supportedLangs = ['javascript', 'typescript', 'javascriptreact', 'typescriptreact'];
-    if (!supportedLangs.includes(document.languageId)) return;
+    if (!supportedLangs.includes(document.languageId)) {return;}
 
     const startTime = Date.now();
     try {
       const tree = await this.astManager.parseDocument(document);
-      
-      if (!tree) return;
+
+      if (!tree) {return;}
 
       // Se o ASTManager retornou um mock/fallback nativo por falha do WASM
       if ((tree as any).isFallback) {
@@ -91,14 +91,14 @@ export class SymbolIndexer {
 
     if (targetTypes.includes(node.type)) {
       let name = '';
-      const nameNode = node.childForFieldName('name') || node.focusedNode;
-      
+      const nameNode = node.childForFieldName('name') || node;
+
       if (nameNode) {
-        name = nameNode.text;
-      } else {
-        // Fallback de extração textual caso a API de fields falhe
-        const firstLine = document.lineAt(node.startPosition.row).text;
-        name = firstLine.substring(node.startPosition.column, node.endPosition.column).split('{')[0].trim();
+        // Forçamos o TypeScript a entender o nó contornando a inferência de 'never'
+        const validNode = nameNode as any;
+
+        const firstLine = document.lineAt(validNode.startPosition.row).text;
+        name = firstLine.substring(validNode.startPosition.column, validNode.endPosition.column).split('{')[0].trim();
       }
 
       const range = new vscode.Range(
@@ -149,7 +149,7 @@ export class SymbolIndexer {
    * Retorna os metadados de símbolos associados a um arquivo específico em O(1)
    */
   public getSymbolsForDocument(uri: vscode.Uri): DocumentSymbols | undefined {
-    return this.symbolCache.set ? this.symbolCache.get(uri.toString()) : undefined;
+    return this.symbolCache.has(uri.toString()) ? this.symbolCache.get(uri.toString()) : undefined;
   }
 
   /**
@@ -157,13 +157,13 @@ export class SymbolIndexer {
    */
   public getFormattedMetadataComments(uri: vscode.Uri): string {
     const docData = this.getSymbolsForDocument(uri);
-    if (!docData || docData.symbols.length === 0) return '';
+    if (!docData || docData.symbols.length === 0) {return '';}
 
     const isHashComment = ['python', 'ruby', 'yaml'].includes(docData.languageId);
     const commentPrefix = isHashComment ? '# ' : '// ';
 
     let output = `${commentPrefix}[DEP]: Símbolos locais detectados em ${vscode.workspace.asRelativePath(uri)}\n`;
-    
+
     docData.symbols.slice(0, 10).forEach(sym => {
       output += `${commentPrefix}  - ${sym.name} (${sym.kind.replace('_', ' ')}) -> \`${sym.signature}\`\n`;
     });
