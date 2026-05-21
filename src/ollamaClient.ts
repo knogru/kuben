@@ -10,13 +10,19 @@ export interface OllamaResponse {
 }
 
 export class OllamaClient {
+  private abortController: AbortController | null = null;
   constructor(
     private endpoint: string = 'http://localhost:11434',
     private model: string = 'qwen2.5-coder:1.5b'
   ) {}
 
   async generate(prompt: string): Promise<string | undefined> {
-    const controller = new AbortController();
+    // create and track controller so callers can cancel
+    if (this.abortController) {
+      this.abortController.abort();
+    }
+    this.abortController = new AbortController();
+    const controller = this.abortController;
     const timeoutMs = 60000;
 
     try {
@@ -53,8 +59,12 @@ export class OllamaClient {
     maxTokens: number = 20
   ): Promise<string | undefined> {
     const prompt = `<|fim_prefix|>${prefix}<|fim_suffix|>${suffix}<|fim_middle|>`;
-
-    const controller = new AbortController();
+    // create and track controller so callers can cancel
+    if (this.abortController) {
+      this.abortController.abort();
+    }
+    this.abortController = new AbortController();
+    const controller = this.abortController;
     const timeoutMs = 60000;
 
     try {
@@ -85,6 +95,17 @@ export class OllamaClient {
         console.error('FIM generation failed:', error);
       }
       return undefined;
+    }
+  }
+
+  cancel() {
+    if (this.abortController) {
+      try {
+        this.abortController.abort();
+      } catch (e) {
+        // ignore
+      }
+      this.abortController = null;
     }
   }
 
