@@ -21,7 +21,49 @@
         "command": "kuben.helloWorld",
         "title": "Hello World"
       }
+      ,
+      {
+        "command": "kuben.toggle",
+        "title": "Toggle Kuben Autocomplete"
+      }
+      ,
+      {
+        "command": "kuben.cancel",
+        "title": "Cancel Kuben Generation"
+      }
     ]
+    ,
+    "configuration": {
+      "type": "object",
+      "title": "Kuben Autocomplete Configuration",
+      "properties": {
+        "kuben.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable or disable the Kuben inline autocomplete extension."
+        },
+        "kuben.endpoint": {
+          "type": "string",
+          "default": "http://localhost:11434",
+          "description": "Ollama server endpoint URL."
+        },
+        "kuben.model": {
+          "type": "string",
+          "default": "qwen2.5-coder:1.5b",
+          "description": "Model to use on the Ollama server."
+        },
+        "kuben.debounceDelay": {
+          "type": "number",
+          "default": 300,
+          "description": "Debounce delay (ms) before sending a completion request."
+        },
+        "kuben.contextWindow": {
+          "type": "number",
+          "default": 30,
+          "description": "Number of lines of context to send as prefix."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
