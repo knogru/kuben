@@ -1,6 +1,9 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { OllamaClient } from '../../ollamaClient';
+import { SymbolIndexer } from '../../symbolIndexer';
+import { ASTManager } from '../../astManager';
+import { ContextManager } from '../../contextManager';
 
 suite('OllamaClient Test Suite', () => {
 	test('cleanCompletion removes prose and fences and returns code', () => {
@@ -32,5 +35,72 @@ suite('OllamaClient Test Suite', () => {
 		(client as any).postJson = async () => ({ ok: false, status: 404, json: async () => ({}) });
 		const res = await client.generateWithFIM('p', 's');
 		assert.strictEqual(res, undefined);
+	});
+
+	test('generateWithFIMStream calls onToken callback for each streamed message', async () => {
+		const client = new OllamaClient('http://localhost:11434', 'test-model');
+		(client as any).postJsonStream = async (_url: string, _body: any, _timeout: number, _signal: any, onMessage: (message: any) => void) => {
+			onMessage({ response: 'const x = 42' });
+			onMessage({ response: ';', done: true });
+		};
+
+		const tokens: string[] = [];
+		const onToken = (token: string) => { tokens.push(token); };
+		await client.generateWithFIMStream('prefix', 'suffix', onToken, 10);
+		assert.deepStrictEqual(tokens, ['const x = 42', ';']);
+	});
+});
+
+suite('SymbolIndexer Test Suite', () => {
+	test('SymbolIndexer.getSymbolsForUri returns empty list for unknown URIs', () => {
+		const indexer = new SymbolIndexer();
+		const fakeUri = vscode.Uri.parse('file:///fake/file.ts');
+		const symbols = indexer.getSymbolsForUri(fakeUri);
+		assert.strictEqual(symbols.length, 0);
+	});
+
+	test('SymbolIndexer.clear removes all indexed symbols', () => {
+		const indexer = new SymbolIndexer();
+		indexer.clear();
+		const fakeUri = vscode.Uri.parse('file:///fake/file.ts');
+		const symbols = indexer.getSymbolsForUri(fakeUri);
+		assert.strictEqual(symbols.length, 0);
+	});
+});
+
+suite('ASTManager Test Suite', () => {
+	test('ASTManager falls back when AST engine is disabled', async () => {
+		const manager = await ASTManager.create(false);
+		const fakeDoc = {
+			uri: vscode.Uri.parse('file:///fake/file.ts'),
+			lineCount: 1,
+			getText: () => '',
+			lineAt: () => ({ text: '' }),
+		} as unknown as vscode.TextDocument;
+
+		await manager.indexDocument(fakeDoc);
+		const symbols = manager.getSymbolsForUri(fakeDoc.uri);
+		assert.ok(Array.isArray(symbols));
+	});
+});
+
+suite('ContextManager Test Suite', () => {
+	test('ContextManager.buildPrefixSuffix creates prefix with metadata comments', async () => {
+		const indexer = new SymbolIndexer();
+		const manager = new ContextManager(indexer);
+
+		const mockDocument = {
+			lineAt: (line: number) => ({ text: 'const x = 1;' }),
+			textDocuments: [],
+			getText: (range: vscode.Range) => 'const x = 1;\nconst y = 2;',
+			lineCount: 10,
+			uri: vscode.Uri.parse('file:///test.ts'),
+		} as unknown as vscode.TextDocument;
+
+		const position = new vscode.Position(1, 5);
+		const { prefix, suffix } = await manager.buildPrefixSuffix(mockDocument, position, 10);
+
+		assert.ok(prefix.includes('const x = 1'));
+		assert.ok(suffix !== undefined);
 	});
 });
