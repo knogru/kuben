@@ -21,20 +21,23 @@ export class ASTManager {
     return ASTManager.instance;
   }
 
-  /**
+ /**
    * Inicializa o ambiente WASM do tree-sitter e pré-carrega os parsers necessários.
    * Deve ser invocado exclusivamente no activate() da extensão.
    */
   public async initialize(context: vscode.ExtensionContext): Promise<boolean> {
-    if (this.isInitialized) {return true;}
+    if (this.isInitialized) { return true; }
 
     try {
-      // Inicializa o módulo WASM base do web-tree-sitter
-
-      // Força a resolução do init e construtor via instância resolvida
-      await (Parser as any).init();
+      // 1. Inicializa o módulo WASM base do web-tree-sitter apontando para a pasta dist/ da extensão
+      await (Parser as any).init({
+        locateFile(scriptName: string) {
+          // Direciona a busca do tree-sitter.wasm para dentro da pasta dist do pacote compilado
+          return path.join(context.extensionPath, 'dist', scriptName);
+        }
+      });
+      
       this.parser = new (Parser as any)();
-
 
       // Mapeamento de linguagens suportadas pela extensão para seus respectivos arquivos WASM
       const languageWasmMap: Record<string, string> = {
@@ -44,10 +47,12 @@ export class ASTManager {
         'typescriptreact': 'tree-sitter-typescript.wasm'
       };
 
+      // 2. Recomendação de Arquitetura: Centralizar artefatos em dist/ para o empacotamento VSIX limpo
       const storagePath = context.extensionPath;
 
       // Carrega os binários WASM dinamicamente
       for (const [langId, wasmFile] of Object.entries(languageWasmMap)) {
+        // Se decidir manter na raiz do projeto compilado em 'parsers', certifique-se de copiar essa pasta no build
         const wasmPath = path.join(storagePath, 'parsers', wasmFile);
         try {
           const langModule = await Parser.Language.load(wasmPath);
@@ -117,7 +122,7 @@ export class ASTManager {
   /**
    * Obtém o tipo de nó sintático na posição atual do cursor para tomada de decisões heurísticas (F04)
    */
-  public getNodeAtPosition(tree: Parser.Tree, position: vscode.Position): Parser.SyntaxNode | null {
+  public getNodeAtPosition(tree: Parser.Tree | null, position: vscode.Position): Parser.SyntaxNode | null {
     if (!tree || (tree as any).isFallback) {return null;}
 
     return tree.rootNode.descendantForPosition({

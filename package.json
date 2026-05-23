@@ -11,36 +11,58 @@
   ],
   "activationEvents": [
     "onLanguage:javascript",
-    "onLanguage:typescript",
-    "onCommand:kuben.helloWorld"
+    "onLanguage:typescript"
   ],
   "main": "./dist/extension.js",
   "contributes": {
-  "configuration": {
-    "title": "Kuben Config",
+    "commands": [
+      {
+        "command": "kuben.showLatency",
+        "title": "Kuben: Show latency"
+      },
+      {
+        "command": "kuben.checkOllamaConnection",
+        "title": "Kuben: Check Ollama connection"
+      }
+    ],
+    "configuration": {
+    "title": "Kuben AI",
     "properties": {
-      "kuben.ollamaEndpoint": {
+      "kuben.ollamaUrl": {
         "type": "string",
         "default": "http://localhost:11434",
-        "description": "Endpoint HTTP da sua instância local do Ollama."
+        "description": "URL base do servidor local do Ollama."
       },
       "kuben.modelName": {
         "type": "string",
         "default": "qwen2.5-coder:1.5b",
-        "description": "Modelo de linguagem focado em código instalado no Ollama."
+        "description": "Modelo LLM local otimizado para FIM utilizado no Autocomplete."
       },
       "kuben.enableGraphRag": {
         "type": "boolean",
         "default": true,
-        "description": "Injeta metadados estruturais de arquivos vizinhos analisados pela AST no prompt FIM."
+        "description": "Habilita a injeção determinística de metadados e dependências locais (Graph RAG) no prompt FIM."
+      },
+      "kuben.useASTEngine": {
+        "type": "boolean",
+        "default": true,
+        "description": "Utiliza análise de AST local avançada para mapear escopos e assinaturas complexas."
+      },
+      "kuben.telemetry.enable": {
+        "type": "boolean",
+        "default": true,
+        "description": "Habilita a coleta de métricas locais de latência (TTFT, Total RTT) para fins de otimização."
       }
     }
   }
 },
   "scripts": {
-    "vscode:prepublish": "npm run package",
-    "compile": "npm run check-types && npm run lint && node esbuild.js",
-    "watch": "npm-run-all -p watch:*",
+    "vscode:prepublish": "npm run compile",
+    "compile": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node && npm run copy-artifacts",
+    "watch": "concurrently \"esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --watch\" \"npm run copy-artifacts\"",
+    "copy-artifacts": "npm run copy-core-wasm && npm run copy-parsers",
+    "copy-core-wasm": "shx cp node_modules/web-tree-sitter/tree-sitter.wasm dist/",
+    "copy-parsers": "shx mkdir -p parsers && shx cp node_modules/tree-sitter-wasms/out/tree-sitter-javascript.wasm parsers/ && shx cp node_modules/tree-sitter-wasms/out/tree-sitter-typescript.wasm parsers/",
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
     "package": "npm run check-types && npm run lint && node esbuild.js --production",
@@ -52,16 +74,19 @@
     "test": "vscode-test"
   },
   "devDependencies": {
-    "@types/vscode": "^1.118.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "22.x",
-    "typescript-eslint": "^8.56.1",
-    "eslint": "^9.39.3",
-    "esbuild": "^0.27.3",
-    "npm-run-all": "^4.1.5",
-    "typescript": "^5.9.3",
+    "@types/vscode": "^1.118.0",
     "@vscode/test-cli": "^0.0.12",
-    "@vscode/test-electron": "^2.5.2"
+    "@vscode/test-electron": "^2.5.2",
+    "copyfiles": "^2.4.1",
+    "esbuild": "^0.27.3",
+    "eslint": "^9.39.3",
+    "npm-run-all": "^4.1.5",
+    "shx": "^0.4.0",
+    "tree-sitter-wasms": "^0.1.13",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.56.1"
   },
   "dependencies": {
     "web-tree-sitter": "^0.20.0"

@@ -1,74 +1,237 @@
 import * as vscode from 'vscode';
 import { SymbolIndexer } from './symbolIndexer';
+import { ASTManager } from './astManager';
 
-export interface FIMContext {
-  prompt: string;
-  prefix: string;
-  suffix: string;
-  rawPrefix: string; // Prefixo puro sem injeção de metadados
+export interface FimInferenceOptions {
+    num_predict?: number;
+    temperature?: number;
+    top_p?: number;
+    max_tokens?: number;
+}
+
+export interface FimPromptContext {
+    prompt: string;
+    suffix: string;
+    options?: FimInferenceOptions;
 }
 
 export class ContextManager {
-  private static instance: ContextManager | null = null;
-  private symbolIndexer: SymbolIndexer;
+    private static instance: ContextManager | null = null;
+    private symbolIndexer: SymbolIndexer;
+    private astManager: ASTManager;
 
-  // Limites conservadores para garantir a latência de sub-300ms no Ollama local
-  private readonly MAX_PREFIX_CHARS = 2500;
-  private readonly MAX_SUFFIX_CHARS = 1200;
-
-  private constructor() {
-    this.symbolIndexer = SymbolIndexer.getInstance();
-  }
-
-  public static getInstance(): ContextManager {
-    if (!ContextManager.instance) {
-      ContextManager.instance = new ContextManager();
-    }
-    return ContextManager.instance;
-  }
-
-  /**
-   * Constrói o contexto FIM ideal combinando buffers do editor e metadados estruturais locais.
-   */
-  public buildFIMContext(document: vscode.TextDocument, position: vscode.Position): FIMContext {
-    const startTime = Date.now();
-    const fullText = document.getText();
-    const offset = document.offsetAt(position);
-
-    // 1. Extração e truncamento linear dos buffers
-    let rawPrefix = fullText.substring(0, offset);
-    let suffix = fullText.substring(offset);
-
-    if (rawPrefix.length > this.MAX_PREFIX_CHARS) {
-      rawPrefix = rawPrefix.substring(rawPrefix.length - this.MAX_PREFIX_CHARS);
-    }
-    if (suffix.length > this.MAX_SUFFIX_CHARS) {
-      suffix = suffix.substring(0, this.MAX_SUFFIX_CHARS);
+    public static getInstance(symbolIndexer?: SymbolIndexer, astManager?: ASTManager): ContextManager {
+        if (!ContextManager.instance) {
+            ContextManager.instance = new ContextManager(
+                symbolIndexer ?? new SymbolIndexer(),
+                astManager ?? ASTManager.getInstance()
+            );
+        }
+        return ContextManager.instance;
     }
 
-    // 2. Resgate de metadados estruturais via Grafo Local (SymbolIndexer) - O(1)
-    let metadataPadding = '';
-    const useGraphRag = vscode.workspace.getConfiguration('kuben').get<boolean>('enableGraphRag', true);
-
-    if (useGraphRag) {
-      metadataPadding = this.symbolIndexer.getFormattedMetadataComments(document.uri);
+    constructor(symbolIndexer: SymbolIndexer, astManager: ASTManager) {
+        this.symbolIndexer = symbolIndexer;
+        this.astManager = astManager;
     }
 
-    // 3. Montagem do prefixo enriquecido (Metadados mascarados + Código do desenvolvedor)
-    const enrichedPrefix = metadataPadding ? `${metadataPadding}\n${rawPrefix}` : rawPrefix;
+    /**
+     * Monta o prompt Fill-in-the-Middle (FIM) injetando metadados determinísticos
+     * mantendo a latência abaixo do budget de 300ms.
+     */
+    public async buildFimPrompt(document: vscode.TextDocument, position: vscode.Position): Promise<FimPromptContext> {
+        const text = document.getText();
+        const offset = document.offsetAt(position);
+        const prefix = text.substring(0, offset);
+        const suffix = text.substring(offset);
 
-    // 4. Formatação seguindo o padrão de tokens FIM estritos (ex: DeepSeek / Qwen)
-    // <|fim_prefix|>...<|fim_suffix|>...<|fim_middle|>
-    const prompt = `<|fim_prefix|>${enrichedPrefix}<|fim_suffix|>${suffix}<||fim_middle|>`;
+        const enableGraphRag = vscode.workspace.getConfiguration('kuben').get<boolean>('enableGraphRag', true);
+        let metadataHeader = '';
+        const commentPrefix = this.getCommentSign(document.languageId);
+        let options: FimInferenceOptions | undefined;
 
-    const duration = Date.now() - startTime;
-    console.debug(`[ContextManager] Prompt montado em ${duration}ms. Tamanho total do prompt: ${prompt.length} caracteres.`);
+        const tree = await this.astManager.parseDocument(document);
+        const node = this.astManager.getNodeAtPosition(tree, position);
 
-    return {
-      prompt,
-      prefix: enrichedPrefix,
-      suffix,
-      rawPrefix
-    };
-  }
+        if (enableGraphRag) {
+            const contextLines = this.buildContextFromAst(document, position, tree);
+            if (contextLines.length > 0) {
+                metadataHeader += contextLines.map(line => `${commentPrefix} ${line}`).join('\n') + '\n';
+            }
+
+            const importLines = this.extractImports(tree);
+            if (importLines.length > 0) {
+                metadataHeader += importLines.map(line => `${commentPrefix} ${line}`).join('\n') + '\n';
+            }
+        }
+
+        options = this.buildInferenceOptions(node, document, position);
+
+        return {
+            prompt: metadataHeader + prefix,
+            suffix: suffix,
+            options
+        };
+    }
+
+    public async buildPrefixSuffix(document: vscode.TextDocument, position: vscode.Position, dependencies: any): Promise<FimPromptContext> {
+        return this.buildFimPrompt(document, position);
+    }
+
+    private buildContextFromAst(document: vscode.TextDocument, position: vscode.Position, tree: any): string[] {
+        const contextLines: string[] = [];
+
+        if (!tree || tree.isFallback) {
+            const symbols = this.symbolIndexer.getSymbolsForDocument(document.uri);
+            symbols
+                .filter(symbol => symbol.lineStart < position.line)
+                .slice(-3)
+                .forEach(symbol => {
+                    contextLines.push(`[DEP]: ${symbol.name} encontrada na linha ${symbol.lineStart}`);
+                });
+            return contextLines;
+        }
+
+        const node = this.astManager.getNodeAtPosition(tree, position);
+        if (!node) {
+            return contextLines;
+        }
+
+        const relevantNodes = this.extractRelevantNodes(node);
+        relevantNodes.forEach(item => contextLines.push(item));
+        return contextLines;
+    }
+
+    private buildInferenceOptions(node: any, document: vscode.TextDocument, position: vscode.Position): FimInferenceOptions {
+        const defaults: FimInferenceOptions = {
+            num_predict: 64,
+            temperature: 0.2,
+            top_p: 0.95
+        };
+
+        if (!node) {
+            return defaults;
+        }
+
+        const shortCompletionTypes = [
+            'identifier',
+            'property_identifier',
+            'member_expression',
+            'call_expression',
+            'dot_member_expression'
+        ];
+
+        const mediumCompletionTypes = [
+            'return_statement',
+            'assignment_expression',
+            'variable_declarator',
+            'arguments',
+            'arrow_function'
+        ];
+
+        const longCompletionTypes = [
+            'function_declaration',
+            'method_definition',
+            'class_declaration',
+            'program'
+        ];
+
+        if (shortCompletionTypes.includes(node.type)) {
+            return {
+                ...defaults,
+                num_predict: 24,
+                temperature: 0.15,
+                max_tokens: 24
+            };
+        }
+
+        if (mediumCompletionTypes.includes(node.type)) {
+            return {
+                ...defaults,
+                num_predict: 32,
+                temperature: 0.18,
+                max_tokens: 48
+            };
+        }
+
+        if (longCompletionTypes.includes(node.type)) {
+            return {
+                ...defaults,
+                num_predict: 96,
+                temperature: 0.22,
+                max_tokens: 128
+            };
+        }
+
+        return defaults;
+    }
+
+    private extractRelevantNodes(node: any): string[] {
+        const lines: string[] = [];
+        const functionNode = node.closest?.('function_declaration') || node.closest?.('method_definition');
+        const classNode = node.closest?.('class_declaration');
+
+        if (functionNode) {
+            lines.push(`function: ${this.trimText(functionNode.text, 120)}`);
+        }
+        if (classNode) {
+            lines.push(`class: ${this.trimText(classNode.text, 120)}`);
+        }
+
+        return lines.slice(0, 3);
+    }
+
+    private extractImports(tree: any): string[] {
+        if (!tree || tree.isFallback) {
+            return [];
+        }
+
+        const imports: string[] = [];
+        const visit = (node: any) => {
+            if (!node) {
+                return;
+            }
+
+            if (node.type === 'import_declaration' || node.type === 'import_statement') {
+                imports.push(this.trimText(node.text, 120));
+                return;
+            }
+
+            if (node.type === 'variable_declarator' && node.text.includes('require(')) {
+                imports.push(this.trimText(node.text, 120));
+                return;
+            }
+
+            const children = node.namedChildren || [];
+            for (const child of children) {
+                if (imports.length >= 3) {
+                    break;
+                }
+                visit(child);
+            }
+        };
+
+        visit(tree.rootNode);
+        return imports.slice(0, 3);
+    }
+
+    private trimText(value: string, maxLength: number): string {
+        if (value.length <= maxLength) {
+            return value.replace(/\n/g, ' ');
+        }
+        return value.slice(0, maxLength).replace(/\n/g, ' ') + '...';
+    }
+
+    /**
+     * Retorna o caractere de comentário correto baseado na ID da linguagem
+     */
+    private getCommentSign(languageId: string): string {
+        switch (languageId) {
+            case 'python':
+            case 'ruby':
+                return '#';
+            default:
+                return '//'; // JS, TS, Java, C++, etc.
+        }
+    }
 }

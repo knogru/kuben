@@ -1,121 +1,170 @@
-import * as http from 'http';
 import * as vscode from 'vscode';
-import { FIMContext } from './contextManager';
+import * as http from 'http';
+import * as https from 'https';
+import * as readline from 'readline';
+import { URL } from 'url';
+import { FimPromptContext } from './contextManager';
+
+export interface OllamaResponseChunk {
+    model: string;
+    created_at: string;
+    response: string; // O token gerado neste chunk
+    done: boolean;
+}
+
+export interface OllamaInferenceOptions {
+    num_predict?: number;
+    temperature?: number;
+    top_p?: number;
+    max_tokens?: number;
+}
 
 export class OllamaClient {
-  private static instance: OllamaClient | null = null;
-  private endpoint: string;
-  private model: string;
+    private static instance: OllamaClient | null = null;
+    private endpoint: string;
+    private model: string;
 
-  private constructor() {
-    const config = vscode.workspace.getConfiguration('kuben');
-    this.endpoint = config.get<string>('ollamaEndpoint', 'http://localhost:11434');
-    this.model = config.get<string>('modelName', 'qwen2.5-coder:1.5b');
-  }
-
-  public static getInstance(): OllamaClient {
-    if (!OllamaClient.instance) {
-      OllamaClient.instance = new OllamaClient();
+    public static getInstance(): OllamaClient {
+        if (!OllamaClient.instance) {
+            OllamaClient.instance = new OllamaClient();
+        }
+        return OllamaClient.instance;
     }
-    return OllamaClient.instance;
-  }
 
-  /**
-   * Realiza a inferência FIM via streaming incremental diretamente do Ollama local.
-   * Suporta cancelamento precoce via CancellationToken do VS Code.
-   */
-  public async generateInlineCompletion(
-    context: FIMContext,
-    token: vscode.CancellationToken
-  ): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const url = new URL(`${this.endpoint}/api/generate`);
-      
-      const payload = JSON.stringify({
-        model: this.model,
-        prompt: context.prompt,
-        stream: true,
-        options: {
-          num_predict: 64,       // Limita a geração para respostas curtas de autocompletar
-          temperature: 0.0,      // Ganho de determinismo e velocidade
-          top_p: 0.9,
-          stop: ["<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "\n\n"] // Critérios de parada física
-        }
-      });
+    constructor() {
+        const config = vscode.workspace.getConfiguration('kuben');
+        this.endpoint = config.get<string>('ollamaUrl', 'http://localhost:11434');
+        this.model = config.get<string>('modelName', 'deepseek-coder:1.3b');
+    }
 
-      const options: http.RequestOptions = {
-        hostname: url.hostname,
-        port: url.port || 80,
-        path: url.pathname,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(payload)
-        }
-      };
-
-      let fullResponse = '';
-      let buffer = '';
-
-      const req = http.request(options, (res) => {
-        if (res.statusCode !== 200) {
-          reject(new Error(`Ollama retornou status HTTP ${res.statusCode}`));
-          return;
-        }
-
-        res.setEncoding('utf8');
-
-        // Escuta os pacotes de rede brutos (TCP chunks)
-        res.on('data', (chunk) => {
-          if (token.isCancellationRequested) {
-            req.destroy(); // Fecha a conexão de rede imediatamente se o usuário digitar algo
-            resolve(fullResponse);
-            return;
-          }
-
-          buffer += chunk;
-          let lineIndex: number;
-
-          // Processa buffer incremental linha por linha (NDJSON)
-          while ((lineIndex = buffer.indexOf('\n')) >= 0) {
-            const line = buffer.substring(0, lineIndex).trim();
-            buffer = buffer.substring(lineIndex + 1);
-
-            if (line) {
-              try {
-                const parsed = JSON.parse(line);
-                if (parsed.response) {
-                  fullResponse += parsed.response;
-                  
-                  // Otimização de Resposta Curta: Se já temos linhas válidas completas e o modelo começa a divagar, podemos cortar antecipadamente
-                  if (fullResponse.includes('\n') && fullResponse.trim().length > 0) {
-                    // Opcional: Interromper stream aqui caso a primeira linha completa já baste
-                  }
-                }
-              } catch (e) {
-                // Ignora JSONs malformados por estarem truncados na borda do chunk de rede
-              }
+    /**
+     * Efetua a requisição FIM via HTTP Stream e invoca o callback token por token.
+     * Retorna uma Promise que resolve ao finalizar o stream (done: true).
+     */
+    public async generateWithFIMStream(
+        context: FimPromptContext,
+        onToken: (token: string) => void,
+        token: vscode.CancellationToken
+    ): Promise<void> {
+        return new Promise((resolve, reject) => {
+            if (token.isCancellationRequested) {
+                return reject(new Error('Cancellation requested before request started.'));
             }
-          }
+
+            const config = vscode.workspace.getConfiguration('kuben');
+            this.endpoint = config.get<string>('ollamaUrl', 'http://localhost:11434');
+            this.model = config.get<string>('modelName', 'deepseek-coder:1.3b');
+
+            const url = new URL(`${this.endpoint}/api/generate`);
+            
+            // Payload cru estruturado para FIM (Fill-in-the-Middle)
+            const defaultOptions: OllamaInferenceOptions = {
+                num_predict: 64,
+                temperature: 0.2,
+                top_p: 0.95
+            };
+
+            const options = {
+                ...defaultOptions,
+                ...(context.options || {})
+            };
+
+            const postData = JSON.stringify({
+                model: this.model,
+                prompt: context.prompt,
+                suffix: context.suffix,
+                stream: true, // Crucial para F04b
+                options
+            });
+
+            const requestOptions: http.RequestOptions = {
+                hostname: url.hostname,
+                port: url.port || (url.protocol === 'https:' ? 443 : 80),
+                path: url.pathname + url.search,
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Content-Length': Buffer.byteLength(postData)
+                }
+            };
+
+            const clientModule = url.protocol === 'https:' ? https : http;
+
+            const req = clientModule.request(requestOptions, (res) => {
+                if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
+                    return reject(new Error(`Ollama returned status code ${res.statusCode}`));
+                }
+
+                // Configura interface de leitura linha por linha sobre o stream HTTP
+                const rl = readline.createInterface({
+                    input: res,
+                    terminal: false
+                });
+
+                // Evento disparado assim que uma nova linha (NDJSON) é despejada no buffer
+                rl.on('line', (line) => {
+                    if (token.isCancellationRequested) {
+                        req.destroy();
+                        rl.close();
+                        return reject(new Error('Cancellation requested during streaming.'));
+                    }
+
+                    if (!line.trim()) return;
+
+                    try {
+                        const chunk: OllamaResponseChunk = JSON.parse(line);
+                        
+                        if (chunk.response) {
+                            onToken(chunk.response); // Despacha o token imediatamente para o editor UI
+                        }
+
+                        if (chunk.done) {
+                            rl.close();
+                        }
+                    } catch (e) {
+                        // Silencia ou loga falhas parciais de parsing sem derrubar a extensão
+                        console.error('[Kuben Inference] Failed to parse stream chunk:', e);
+                    }
+                });
+
+                rl.on('close', () => {
+                    resolve();
+                });
+
+                res.on('error', (err) => {
+                    reject(err);
+                });
+            });
+
+            req.on('error', (err) => {
+                reject(err);
+            });
+
+            // Aborta a requisição HTTP imediatamente caso o usuário continue digitando
+            token.onCancellationRequested(() => {
+                req.destroy();
+                resolve(); 
+            });
+
+            req.write(postData);
+            req.end();
         });
+    }
 
-        res.on('end', () => {
-          resolve(fullResponse);
-        });
-      });
-
-      req.on('error', (err) => {
-        reject(err);
-      });
-
-      // Vincula o mecanismo de cancelamento do VS Code diretamente ao ciclo de vida da requisição HTTP
-      token.onCancellationRequested(() => {
-        req.destroy();
-        resolve(fullResponse);
-      });
-
-      req.write(payload);
-      req.end();
-    });
-  }
+    public async checkConnection(): Promise<boolean> {
+        try {
+            const config = vscode.workspace.getConfiguration('kuben');
+            this.endpoint = config.get<string>('ollamaUrl', 'http://localhost:11434');
+            const response = await fetch(`${this.endpoint}/api/models`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            return response.ok;
+        } catch (err) {
+            console.warn('[Kuben] checkConnection failed:', err);
+            return false;
+        }
+    }
 }

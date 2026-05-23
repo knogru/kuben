@@ -1,180 +1,164 @@
 import * as vscode from 'vscode';
-import * as Parser from 'web-tree-sitter';
-import { ASTManager } from './astManager';
 
-export interface SymbolMetadata {
-  name: string;
-  kind: string;
-  range: vscode.Range;
-  signature?: string;
-}
-
-export interface DocumentSymbols {
-  uri: string;
-  languageId: string;
-  symbols: SymbolMetadata[];
+export interface FlattenedSymbol {
+    name: string;
+    kind: vscode.SymbolKind;
+    containerName?: string;
+    lineStart: number;
+    lineEnd: number;
 }
 
 export class SymbolIndexer {
-  private static instance: SymbolIndexer | null = null;
-  private astManager: ASTManager;
+    private cache: Map<string, FlattenedSymbol[]> = new Map();
+    private debounceTimers: Map<string, NodeJS.Timeout> = new Map();
 
-  // Repositório in-memory para acesso O(1) de símbolos por arquivo
-  private symbolCache: Map<string, DocumentSymbols> = new Map();
+    constructor() {}
 
-  private constructor() {
-    this.astManager = ASTManager.getInstance();
-  }
+    /**
+     * Ponto de entrada chamado estritamente na ativação da extensão.
+     * Registra os listeners incrementais altamente reativos.
+     */
+    public initialize(context: vscode.ExtensionContext): void {
+        console.log('[Kuben Indexer] Inicializando motor de indexação incremental...');
 
-  /**
-   * Retorna a instância única do SymbolIndexer (Singleton)
-   */
-  public static getInstance(): SymbolIndexer {
-    if (!SymbolIndexer.instance) {
-      SymbolIndexer.instance = new SymbolIndexer();
-    }
-    return SymbolIndexer.instance;
-  }
+        // Evento 1: Indexação imediata ao abrir o arquivo
+        context.subscriptions.push(
+            vscode.workspace.onDidOpenTextDocument(async (document) => {
+                await this.indexDocument(document);
+            })
+        );
 
-  /**
-   * Executa a indexação ou reindexação incremental de um único documento.
-   * Chamado de forma reativa para evitar gargalos de CPU.
-   */
-  public async indexDocument(document: vscode.TextDocument): Promise<void> {
-    const enabled = vscode.workspace.getConfiguration('kuben').get<boolean>('enableGraphRag', true);
-    if (!enabled) {return;}
+        // Evento 2: Indexação reativa em tempo de digitação (Debounce de 1.5s)
+        // Evita chamadas excessivas ao Language Server durante digitação contínua
+        context.subscriptions.push(
+            vscode.workspace.onDidChangeTextDocument(async (event) => {
+                if (event.document.uri.scheme !== 'file') return;
+                this.triggerDebouncedIndexing(event.document);
+            })
+        );
 
-    // Filtro básico para linguagens suportadas nesta fase
-    const supportedLangs = ['javascript', 'typescript', 'javascriptreact', 'typescriptreact'];
-    if (!supportedLangs.includes(document.languageId)) {return;}
+        // Limpeza de cache ao fechar o documento para evitar vazamento de memória (Memory Leak)
+        context.subscriptions.push(
+            vscode.workspace.onDidCloseTextDocument((document) => {
+                const uriStr = document.uri.toString();
+                this.cache.delete(uriStr);
+                
+                const timer = this.debounceTimers.get(uriStr);
+                if (timer) {
+                    clearTimeout(timer);
+                    this.debounceTimers.delete(uriStr);
+                }
+            })
+        );
 
-    const startTime = Date.now();
-    try {
-      const tree = await this.astManager.parseDocument(document);
+        // Atualiza o índice ao salvar o arquivo, mantendo o grafo de símbolos consistente.
+        context.subscriptions.push(
+            vscode.workspace.onDidSaveTextDocument(async (document) => {
+                if (document.uri.scheme !== 'file') return;
+                await this.indexDocument(document);
+            })
+        );
 
-      if (!tree) {return;}
-
-      // Se o ASTManager retornou um mock/fallback nativo por falha do WASM
-      if ((tree as any).isFallback) {
-        this.indexViaFallbackSymbols(document, (tree as any).data);
-        return;
-      }
-
-      const extractedSymbols: SymbolMetadata[] = [];
-      this.traverseTree(tree.rootNode, document, extractedSymbols);
-
-      this.symbolCache.set(document.uri.toString(), {
-        uri: document.uri.toString(),
-        languageId: document.languageId,
-        symbols: extractedSymbols
-      });
-
-      const duration = Date.now() - startTime;
-      console.debug(`[SymbolIndexer] Indexação incremental concluída para ${document.uri.fsPath} em ${duration}ms. Encontrados: ${extractedSymbols.length} símbolos.`);
-    } catch (error) {
-      console.error(`[SymbolIndexer] Falha ao indexar incrementalmente o arquivo ${document.uri.toString()}:`, error);
-    }
-  }
-
-  /**
-   * Varredura recursiva de nós da AST gerada pelo tree-sitter para extração seletiva
-   */
-  private traverseTree(node: Parser.SyntaxNode, document: vscode.TextDocument, symbols: SymbolMetadata[]): void {
-    // Nós de interesse para autocomplete e engenharia de contexto
-    const targetTypes = [
-      'function_declaration',
-      'method_definition',
-      'class_declaration',
-      'lexical_declaration', // const, let
-      'variable_declaration' // var
-    ];
-
-    if (targetTypes.includes(node.type)) {
-      let name = '';
-      const nameNode = node.childForFieldName('name') || node;
-
-      if (nameNode) {
-        // Forçamos o TypeScript a entender o nó contornando a inferência de 'never'
-        const validNode = nameNode as any;
-
-        const firstLine = document.lineAt(validNode.startPosition.row).text;
-        name = firstLine.substring(validNode.startPosition.column, validNode.endPosition.column).split('{')[0].trim();
-      }
-
-      const range = new vscode.Range(
-        new vscode.Position(node.startPosition.row, node.startPosition.column),
-        new vscode.Position(node.endPosition.row, node.endPosition.column)
-      );
-
-      // Captura da assinatura/linha de definição do símbolo para injeção limpa no prompt
-      const definitionLine = document.lineAt(node.startPosition.row).text.trim();
-
-      symbols.push({
-        name: name || 'anonymous',
-        kind: node.type,
-        range: range,
-        signature: definitionLine
-      });
+        // Indexa o documento ativo se houver um na inicialização
+        if (vscode.window.activeTextEditor) {
+            this.indexDocument(vscode.window.activeTextEditor.document);
+        }
     }
 
-    // Navegação profunda na árvore sintática
-    for (let i = 0; i < node.childCount; i++) {
-      const child = node.child(i);
-      if (child) {
-        this.traverseTree(child, document, symbols);
-      }
+    /**
+     * Gerencia a fila de debounce por arquivo para garantir reatividade sem gargalos
+     */
+    private triggerDebouncedIndexing(document: vscode.TextDocument): void {
+        const uriStr = document.uri.toString();
+        
+        const existingTimer = this.debounceTimers.get(uriStr);
+        if (existingTimer) {
+            clearTimeout(existingTimer);
+        }
+
+        const timer = setTimeout(async () => {
+            await this.indexDocument(document);
+            this.debounceTimers.delete(uriStr);
+        }, 1500); // 1.5 segundos sem digitar aciona a reindexação de AST de fundo
+
+        this.debounceTimers.set(uriStr, timer);
     }
-  }
 
-  /**
-   * Preenche o cache utilizando os dados recuperados do provedor nativo do VS Code (Estratégia de Fallback)
-   */
-  private indexViaFallbackSymbols(document: vscode.TextDocument, vscodeSymbols: vscode.DocumentSymbol[]): void {
-    const extractedSymbols: SymbolMetadata[] = vscodeSymbols.map(sym => ({
-      name: sym.name,
-      kind: vscode.SymbolKind[sym.kind],
-      range: sym.range,
-      signature: document.lineAt(sym.range.start.line).text.trim()
-    }));
+    /**
+     * Executa a extração determinística e achata a árvore de símbolos para consumo imediato
+     */
+    private async indexDocument(document: vscode.TextDocument): Promise<void> {
+        if (document.uri.scheme !== 'file') return;
 
-    this.symbolCache.set(document.uri.toString(), {
-      uri: document.uri.toString(),
-      languageId: document.languageId,
-      symbols: extractedSymbols
-    });
-    console.debug(`[SymbolIndexer] Cache populado via Fallback Nativo para ${document.uri.fsPath}.`);
-  }
+        const startTime = performance.now();
+        try {
+            // Invoca o LSP local de forma assíncrona
+            const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+                'vscode.executeDocumentSymbolProvider',
+                document.uri
+            );
 
-  /**
-   * Retorna os metadados de símbolos associados a um arquivo específico em O(1)
-   */
-  public getSymbolsForDocument(uri: vscode.Uri): DocumentSymbols | undefined {
-    return this.symbolCache.has(uri.toString()) ? this.symbolCache.get(uri.toString()) : undefined;
-  }
+            if (symbols && symbols.length > 0) {
+                const flattened: FlattenedSymbol[] = [];
+                this.flattenSymbols(symbols, flattened);
+                
+                this.cache.set(document.uri.toString(), flattened);
+                
+                const duration = performance.now() - startTime;
+                console.debug(`[Kuben Indexer] ${document.fileName} reindexado em ${duration.toFixed(2)}ms. Símbolos úteis: ${flattened.length}`);
+            }
+        } catch (error) {
+            // Falhas silenciadas para não impactar a experiência de digitação do usuário
+            console.debug(`[Kuben Indexer] Provedor de símbolos indisponível no momento para ${document.fileName}`);
+        }
+    }
 
-  /**
-   * Formata os símbolos coletados no padrão de comentário agnóstico para injeção contextual limpa
-   */
-  public getFormattedMetadataComments(uri: vscode.Uri): string {
-    const docData = this.getSymbolsForDocument(uri);
-    if (!docData || docData.symbols.length === 0) {return '';}
+    /**
+     * Transforma recursivamente a árvore do AST em uma lista linear focada em escopos relevantes
+     */
+    private flattenSymbols(
+        symbols: vscode.DocumentSymbol[], 
+        result: FlattenedSymbol[], 
+        containerName?: string
+    ): void {
+        for (const symbol of symbols) {
+            // Filtragem seletiva: ignoramos variáveis locais puras dentro de funções para limpar o ruído do Graph RAG
+            const isRelevant = [
+                vscode.SymbolKind.Class,
+                vscode.SymbolKind.Interface,
+                vscode.SymbolKind.Method,
+                vscode.SymbolKind.Function,
+                vscode.SymbolKind.Enum,
+                vscode.SymbolKind.Struct
+            ].includes(symbol.kind);
 
-    const isHashComment = ['python', 'ruby', 'yaml'].includes(docData.languageId);
-    const commentPrefix = isHashComment ? '# ' : '// ';
+            if (isRelevant) {
+                result.push({
+                    name: symbol.name,
+                    kind: symbol.kind,
+                    containerName: containerName,
+                    lineStart: symbol.range.start.line,
+                    lineEnd: symbol.range.end.line
+                });
+            }
 
-    let output = `${commentPrefix}[DEP]: Símbolos locais detectados em ${vscode.workspace.asRelativePath(uri)}\n`;
+            // Explora recursivamente os filhos (ex: métodos dentro de uma classe)
+            if (symbol.children && symbol.children.length > 0) {
+                this.flattenSymbols(symbol.children, result, symbol.name);
+            }
+        }
+    }
 
-    docData.symbols.slice(0, 10).forEach(sym => {
-      output += `${commentPrefix}  - ${sym.name} (${sym.kind.replace('_', ' ')}) -> \`${sym.signature}\`\n`;
-    });
+    /**
+     * Recupera a lista achatada de símbolos mapeados no documento
+     */
+    public getSymbolsForDocument(uri: vscode.Uri): FlattenedSymbol[] {
+        return this.cache.get(uri.toString()) || [];
+    }
 
-    return output;
-  }
-
-  /**
-   * Remove o documento do cache em caso de fechamento ou deleção do arquivo
-   */
-  public removeDocument(uri: vscode.Uri): void {
-    this.symbolCache.delete(uri.toString());
-  }
+    public getSymbolsForPosition(document: vscode.TextDocument, position: vscode.Position): FlattenedSymbol[] {
+        const symbols = this.getSymbolsForDocument(document.uri);
+        const line = position.line;
+        return symbols.filter(symbol => symbol.lineStart <= line && symbol.lineEnd >= line);
+    }
 }
