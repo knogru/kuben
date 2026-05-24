@@ -1,96 +1,105 @@
 import * as assert from 'assert';
 import { ActiveTruncator } from '../application/active-truncator';
 import { IncrementalPostProcessor } from '../infrastructure/incremental-post-processor';
-import { IFimPayload, ISyntaxBounds } from '../domain/types';
-import { ITruncationBudget } from '../domain/truncation-types';
+import { IFimPayload } from '../domain/types';
 
 suite('ActiveTruncator Test Suite', () => {
-    const truncator = new ActiveTruncator();
-
-    test('payload below limit returns zero modifications', () => {
+    test('payload within budget returns zero modifications', () => {
+        const truncator = new ActiveTruncator();
         const payload: IFimPayload = {
             prefix: 'const x = 1;\nconst y = 2;\n',
             suffix: 'console.log(x);\n',
             isSpmFormat: false,
         };
 
-        const budget: ITruncationBudget = {
-            maxContextTokens: 1024,
-            maxPrefixLines: 60,
-            maxSuffixLines: 10,
-            reservedCompletionTokens: 24,
-        };
+        const { truncatedPayload, metrics } = truncator.truncatePayload(payload, 'source_file');
 
-        const { result, metrics } = truncator.truncatePayload(payload, budget);
-
-        assert.strictEqual(result.prefix, payload.prefix);
-        assert.strictEqual(result.suffix, payload.suffix);
-        assert.strictEqual(result.truncatedPrefix, false);
-        assert.strictEqual(result.truncatedSuffix, false);
-        assert.strictEqual(metrics.wasAltered, false);
+        assert.strictEqual(truncatedPayload.prefix, payload.prefix);
+        assert.strictEqual(truncatedPayload.suffix, payload.suffix);
+        assert.strictEqual(metrics.truncationApplied, false);
+        assert.strictEqual(metrics.prefixWasTruncated, false);
+        assert.strictEqual(metrics.suffixWasTruncated, false);
     });
 
     test('long prefix is truncated at nearest line break preserving end', () => {
+        const truncator = new ActiveTruncator({
+            maxContextTokens: 256,
+            generationReserve: 24,
+            sentinelOverhead: 3,
+            graphRagOverhead: 50,
+            charToTokenRatio: 4,
+            prefixRatio: 0.60,
+            suffixRatio: 0.40,
+        });
+
         const lines: string[] = [];
         for (let i = 0; i < 100; i++) {
             lines.push(`// line ${i}`);
         }
-        const prefix = lines.join('\n') + '\nconst result = 42;\n';
+        const longPrefix = lines.join('\n') + '\nconst result = 42;\n';
 
         const payload: IFimPayload = {
-            prefix,
+            prefix: longPrefix,
             suffix: 'console.log(result);\n',
             isSpmFormat: false,
         };
 
-        const budget: ITruncationBudget = {
-            maxContextTokens: 1024,
-            maxPrefixLines: 10,
-            maxSuffixLines: 10,
-            reservedCompletionTokens: 24,
-        };
+        const { truncatedPayload, metrics } = truncator.truncatePayload(payload, 'source_file');
 
-        const { result, metrics } = truncator.truncatePayload(payload, budget);
-
-        assert.strictEqual(result.truncatedPrefix, true);
-        assert.ok(result.prefix.endsWith('const result = 42;\n'), `expected to end with 'const result = 42;\\n', got: ${result.prefix.slice(-30)}`);
-        assert.ok(result.prefix.split('\n').length <= 12, `prefix lines: ${result.prefix.split('\n').length}`);
-        assert.strictEqual(metrics.wasAltered, true);
-        assert.ok(metrics.reason);
+        assert.strictEqual(metrics.truncationApplied, true);
+        assert.strictEqual(metrics.prefixWasTruncated, true);
+        assert.ok(truncatedPayload.prefix.length < payload.prefix.length, 'prefix should be shorter');
+        assert.ok(truncatedPayload.prefix.endsWith('const result = 42;\n'), 'prefix should preserve end content');
     });
 
     test('import_declaration block preserves prefix, truncates only suffix', () => {
+        const truncator = new ActiveTruncator({
+            maxContextTokens: 128,
+            generationReserve: 24,
+            sentinelOverhead: 3,
+            graphRagOverhead: 50,
+            charToTokenRatio: 4,
+            prefixRatio: 0.60,
+            suffixRatio: 0.40,
+        });
+
         const payload: IFimPayload = {
             prefix: "import { foo } from './bar';\nimport { baz } from './qux';\n",
-            suffix: 'const x = 1;\nconst y = 2;\nconst z = 3;\nconst w = 4;\nconst v = 5;\nconst u = 6;\n',
+            suffix: 'x'.repeat(500) + '\n',
             isSpmFormat: false,
         };
 
-        const bounds: ISyntaxBounds = {
-            blockType: 'import_declaration',
-            hasValidScope: true,
-            startLine: 0,
-            endLine: 1,
-            isInsideFunction: false,
-            isInsideClass: false,
-            isInsideBlock: false,
-            braceStack: [],
+        const { truncatedPayload, metrics } = truncator.truncatePayload(payload, 'import_declaration');
+
+        assert.strictEqual(metrics.prefixWasTruncated, false, 'prefix should be preserved for imports');
+        assert.strictEqual(metrics.suffixWasTruncated, true, 'suffix should be truncated');
+        assert.ok(truncatedPayload.prefix.includes("import { foo }"), 'prefix should preserve imports');
+        assert.ok(truncatedPayload.suffix.length < payload.suffix.length, 'suffix should be shorter');
+        assert.strictEqual(metrics.truncationApplied, true);
+    });
+
+    test('long prefix without newlines falls back to linear cut', () => {
+        const truncator = new ActiveTruncator({
+            maxContextTokens: 128,
+            generationReserve: 24,
+            sentinelOverhead: 3,
+            graphRagOverhead: 50,
+            charToTokenRatio: 4,
+            prefixRatio: 0.60,
+            suffixRatio: 0.40,
+        });
+
+        const singleLine = 'x'.repeat(1000);
+        const payload: IFimPayload = {
+            prefix: singleLine,
+            suffix: 'y',
+            isSpmFormat: false,
         };
 
-        const budget: ITruncationBudget = {
-            maxContextTokens: 1024,
-            maxPrefixLines: 60,
-            maxSuffixLines: 3,
-            reservedCompletionTokens: 24,
-        };
+        const { truncatedPayload, metrics } = truncator.truncatePayload(payload, 'source_file');
 
-        const { result, metrics } = truncator.truncatePayload(payload, budget, bounds);
-
-        assert.strictEqual(result.truncatedPrefix, false);
-        assert.strictEqual(result.truncatedSuffix, true);
-        assert.ok(result.prefix.includes("import { foo }"), 'prefix should preserve imports');
-        assert.strictEqual(result.suffix.split('\n').length, 3, 'suffix should be truncated to 3 lines');
-        assert.strictEqual(metrics.wasAltered, true);
+        assert.strictEqual(metrics.prefixWasTruncated, true);
+        assert.ok(truncatedPayload.prefix.length < payload.prefix.length);
     });
 });
 
@@ -101,84 +110,89 @@ suite('IncrementalPostProcessor Test Suite', () => {
         const result = processor.evaluate(
             'function foo() {\n  return 1;\n}',
             '\n',
-            24,
         );
 
         assert.strictEqual(result.shouldStop, false);
+        assert.strictEqual(result.rule, null);
     });
 
-    test('bracket_match with excess closing brace triggers and removes only excess brace', () => {
+    test('bracket_match with excess closing brace triggers on first excess', () => {
         const result = processor.evaluate(
             'function foo() {\n  return 1;\n}\n}',
-            '\n',
-            24,
+            '}',
         );
 
         assert.strictEqual(result.shouldStop, true);
-        assert.strictEqual(result.reason, 'bracket_match');
-        assert.strictEqual(result.accumulatedText, 'function foo() {\n  return 1;\n}\n');
+        assert.strictEqual(result.rule, 'bracket_match');
+        assert.strictEqual(result.cleanedText, 'function foo() {\n  return 1;\n}');
+        assert.ok(!result.cleanedText.includes('}}'), 'cleanedText should not contain double braces');
     });
 
-    test('sibling_collision with newline function triggers at boundary', () => {
+    test('sibling_collision with newline function triggers', () => {
         const result = processor.evaluate(
             '  return 42;\nfunction ',
-            'function bar() {\n  return 7;\n}',
-            24,
+            '\nfunction bar() {\n  return 7;\n}',
         );
 
         assert.strictEqual(result.shouldStop, true);
-        assert.strictEqual(result.reason, 'sibling_collision');
-        assert.strictEqual(result.accumulatedText, '  return 42;\n');
+        assert.strictEqual(result.rule, 'sibling_collision');
+        assert.ok(!result.cleanedText.includes('\nfunction '));
     });
 
     test('function inside variable name does NOT trigger sibling_collision', () => {
         const result = processor.evaluate(
             'myFunctionHelper',
             '\nconst x = 1;\n',
-            24,
         );
 
         assert.strictEqual(result.shouldStop, false);
-    });
-
-    test('max_tokens triggers when token count exceeds limit', () => {
-        const longText = 'x = 1; '.repeat(30);
-        const result = processor.evaluate(
-            longText,
-            '',
-            5,
-        );
-
-        assert.strictEqual(result.shouldStop, true);
-        assert.strictEqual(result.reason, 'max_tokens');
     });
 
     test('empty text does not trigger any stop rule', () => {
-        const result = processor.evaluate('', 'suffix', 24);
+        const result = processor.evaluate('', 'suffix');
 
         assert.strictEqual(result.shouldStop, false);
-        assert.strictEqual(result.reason, undefined);
+        assert.strictEqual(result.rule, null);
+        assert.strictEqual(result.cleanedText, '');
     });
 
-    test('balanced parentheses and brackets do not trigger bracket_match', () => {
+    test('excess closing brace with suffix not starting with brace does NOT trigger', () => {
         const result = processor.evaluate(
-            'foo([1, 2, 3])',
-            '\nbar()',
-            24,
+            'function foo() {\n  return 1;\n}\n}',
+            '\n',
         );
 
         assert.strictEqual(result.shouldStop, false);
     });
 
-    test('excess closing parenthesis triggers bracket_match', () => {
+    test('bracket_match respects open vs close balance', () => {
         const result = processor.evaluate(
-            'foo(1, 2))',
-            '',
-            24,
+            '{ key: value }',
+            '}',
+        );
+
+        assert.strictEqual(result.shouldStop, false, 'balanced braces should not trigger');
+    });
+
+    test('sibling_collision with double newline triggers', () => {
+        const result = processor.evaluate(
+            'const x = 1;\n\n',
+            '\nconst y = 2;\n',
         );
 
         assert.strictEqual(result.shouldStop, true);
-        assert.strictEqual(result.reason, 'bracket_match');
-        assert.strictEqual(result.accumulatedText, 'foo(1, 2)');
+        assert.strictEqual(result.rule, 'sibling_collision');
+    });
+
+    test('custom stop sequences override defaults', () => {
+        const customProcessor = new IncrementalPostProcessor(['\nCUSTOM_STOP\n']);
+        const result = customProcessor.evaluate(
+            'before\nCUSTOM_STOP\n',
+            'suffix',
+        );
+
+        assert.strictEqual(result.shouldStop, true);
+        assert.strictEqual(result.rule, 'sibling_collision');
+        assert.strictEqual(result.cleanedText, 'before');
     });
 });

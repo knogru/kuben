@@ -1,13 +1,12 @@
+import * as vscode from 'vscode';
 import { IFimPayload, IInferenceConfig, ITelemetryPayload, TelemetryCallback } from '../domain/types';
-import { IStreamEvaluationResult } from '../domain/truncation-types';
 import { PromptFormatter } from '../infrastructure/prompt-formatter';
-import { IncrementalPostProcessor } from '../infrastructure/incremental-post-processor';
 import { OllamaClient } from '../ollamaClient';
 
 export interface IGenerationResult {
-    text: string;
-    cancelled: boolean;
-    telemetry: ITelemetryPayload;
+    readonly text: string;
+    readonly cancelled: boolean;
+    readonly telemetry: ITelemetryPayload;
 }
 
 export class InferenceAgent {
@@ -15,13 +14,11 @@ export class InferenceAgent {
     private currentRequestId: number = 0;
     private ollamaClient: OllamaClient;
     private promptFormatter: PromptFormatter;
-    private postProcessor: IncrementalPostProcessor;
     private telemetryCallback: TelemetryCallback | undefined = undefined;
 
     constructor(ollamaClient: OllamaClient, telemetryCallback?: TelemetryCallback) {
         this.ollamaClient = ollamaClient;
         this.promptFormatter = new PromptFormatter();
-        this.postProcessor = new IncrementalPostProcessor();
         this.telemetryCallback = telemetryCallback;
     }
 
@@ -32,11 +29,12 @@ export class InferenceAgent {
         }
     }
 
-    async generateWithFIM(
+    async executeInference(
         payload: IFimPayload,
         config: IInferenceConfig,
         documentVersion: number,
-        referenceSuffix: string,
+        cancellationToken: vscode.CancellationToken | undefined,
+        syntheticStopSignal: AbortSignal | undefined,
         onToken?: (token: string) => void,
     ): Promise<IGenerationResult> {
         const requestId = ++this.currentRequestId;
@@ -46,9 +44,21 @@ export class InferenceAgent {
             this.abortController.abort();
         }
         this.abortController = new AbortController();
-        const signal = this.abortController.signal;
+        const versionSignal = this.abortController.signal;
 
-        if (signal.aborted) {
+        const signals: AbortSignal[] = [versionSignal];
+        if (syntheticStopSignal) {
+            signals.push(syntheticStopSignal);
+        }
+
+        let combinedSignal: AbortSignal;
+        if (signals.length === 1) {
+            combinedSignal = signals[0];
+        } else {
+            combinedSignal = AbortSignal.any(signals);
+        }
+
+        if (combinedSignal.aborted || (cancellationToken?.isCancellationRequested ?? false)) {
             return this.buildCancelledResult(startTime, documentVersion, 'cancelled_before_start');
         }
 
@@ -60,8 +70,18 @@ export class InferenceAgent {
         let abortReason: string | undefined = undefined;
         let finished = false;
 
+        const onDoneInternal = () => {
+            finished = true;
+        };
+
         const onTokenInternal = (token: string) => {
-            if (signal.aborted || this.currentRequestId !== requestId) {
+            if (combinedSignal.aborted || this.currentRequestId !== requestId) {
+                cancelled = true;
+                abortReason = 'cancelled';
+                return;
+            }
+
+            if (cancellationToken?.isCancellationRequested ?? false) {
                 cancelled = true;
                 abortReason = 'cancelled';
                 return;
@@ -70,27 +90,9 @@ export class InferenceAgent {
             accumulatedTokens.push(token);
             accumulatedText += token;
 
-            const evalResult: IStreamEvaluationResult = this.postProcessor.evaluate(
-                accumulatedText,
-                referenceSuffix,
-                config.numPredict,
-            );
-
-            if (evalResult.shouldStop) {
-                accumulatedText = evalResult.accumulatedText;
-                abortReason = evalResult.reason;
-                if (this.abortController) {
-                    this.abortController.abort();
-                }
-            }
-
             if (onToken) {
                 onToken(token);
             }
-        };
-
-        const onDoneInternal = () => {
-            finished = true;
         };
 
         try {
@@ -99,12 +101,12 @@ export class InferenceAgent {
                 requestBody,
                 onTokenInternal,
                 onDoneInternal,
-                signal,
+                combinedSignal,
             );
         } catch (error: unknown) {
             if (error instanceof Error && error.message === 'AbortError') {
                 cancelled = true;
-                if (!abortReason) {abortReason = 'cancelled';}
+                if (!abortReason) { abortReason = 'cancelled'; }
             } else {
                 const errMsg = error instanceof Error ? error.message : String(error);
                 console.error('InferenceAgent: generation failed:', errMsg);

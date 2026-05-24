@@ -1,40 +1,40 @@
 export interface IFimPayload {
-    prefix: string;
-    suffix: string;
-    isSpmFormat: boolean;
+    readonly prefix: string;
+    readonly suffix: string;
+    readonly isSpmFormat: boolean;
 }
 
 export interface ISyntaxBounds {
-    blockType: string;
-    hasValidScope: boolean;
-    startLine: number;
-    endLine: number;
-    isInsideFunction: boolean;
-    isInsideClass: boolean;
-    isInsideBlock: boolean;
-    braceStack: string[];
+    readonly blockType: string;
+    readonly hasValidScope: boolean;
+    readonly startLine: number;
+    readonly endLine: number;
+    readonly isInsideFunction: boolean;
+    readonly isInsideClass: boolean;
+    readonly isInsideBlock: boolean;
+    readonly braceStack: string[];
 }
 
 export interface IInferenceConfig {
-    model: string;
-    endpoint: string;
-    numPredict: number;
-    temperature: number;
-    topP: number | undefined;
-    numCtx: number;
-    raw: boolean;
-    stream: boolean;
+    readonly model: string;
+    readonly endpoint: string;
+    readonly numPredict: number;
+    readonly temperature: number;
+    readonly topP: number | undefined;
+    readonly numCtx: number;
+    readonly raw: boolean;
+    readonly stream: boolean;
 }
 
 export interface ITelemetryPayload {
-    timestamp: number;
-    latencyMs: number;
-    language: string;
-    documentVersion: number;
-    truncated: boolean;
-    tokenCount: number;
-    error: boolean;
-    abortReason: string | undefined;
+    readonly timestamp: number;
+    readonly latencyMs: number;
+    readonly language: string;
+    readonly documentVersion: number;
+    readonly truncated: boolean;
+    readonly tokenCount: number;
+    readonly error: boolean;
+    readonly abortReason: string | undefined;
 }
 
 export interface TelemetryCallback {

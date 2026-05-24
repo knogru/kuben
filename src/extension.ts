@@ -8,7 +8,7 @@ import { ActiveTruncator } from './application/active-truncator';
 import { InferenceAgent } from './application/inference-agent';
 import { IncrementalPostProcessor } from './infrastructure/incremental-post-processor';
 import { IFimPayload, IInferenceConfig, ITelemetryPayload, DEFAULT_INFERENCE_CONFIG } from './domain/types';
-import { ITruncationBudget, DEFAULT_TRUNCATION_BUDGET, IStreamEvaluationResult } from './domain/truncation-types';
+import { ITruncationResult } from './domain/truncation-types';
 
 export async function activate(context: vscode.ExtensionContext) {
     const config = vscode.workspace.getConfiguration('kuben');
@@ -136,12 +136,13 @@ export async function activate(context: vscode.ExtensionContext) {
                 isSpmFormat: false,
             };
 
-            const budget: ITruncationBudget = {
-                ...DEFAULT_TRUNCATION_BUDGET,
-                maxContextTokens: 1024,
-            };
+            const blockType = bounds?.blockType ?? 'source_file';
+            const truncationResult: ITruncationResult = activeTruncator.truncatePayload(
+                payload,
+                blockType,
+            );
 
-            const { result: truncatedPayload } = activeTruncator.truncatePayload(payload, budget, bounds);
+            const referenceSuffix = truncationResult.truncatedPayload.suffix;
 
             const inferenceConfig: IInferenceConfig = {
                 ...DEFAULT_INFERENCE_CONFIG,
@@ -152,27 +153,37 @@ export async function activate(context: vscode.ExtensionContext) {
             statusBar.text = '$(sync~spin) Kuben: Generating';
             statusBar.show();
 
-            const fimPayload: IFimPayload = {
-                prefix: truncatedPayload.prefix,
-                suffix: truncatedPayload.suffix,
-                isSpmFormat: false,
-            };
+            let accumulatedCompletion = '';
+            const streamAbortController = new AbortController();
 
-            const generationResult = await inferenceAgent.generateWithFIM(
-                fimPayload,
+            const generationResult = await inferenceAgent.executeInference(
+                truncationResult.truncatedPayload,
                 inferenceConfig,
                 document.version,
-                truncatedPayload.suffix,
-                undefined,
+                token,
+                streamAbortController.signal,
+                (chunk: string) => {
+                    accumulatedCompletion += chunk;
+
+                    const evaluation = postProcessor.evaluate(
+                        accumulatedCompletion,
+                        referenceSuffix,
+                    );
+
+                    if (evaluation.shouldStop) {
+                        accumulatedCompletion = evaluation.cleanedText;
+                        streamAbortController.abort();
+                    }
+                },
             );
 
             statusBar.hide();
 
-            if (generationResult.cancelled || !generationResult.text.trim()) {
+            if (generationResult.cancelled || !accumulatedCompletion.trim()) {
                 return undefined;
             }
 
-            return generationResult.text;
+            return accumulatedCompletion;
         },
         debounceDelay,
     );

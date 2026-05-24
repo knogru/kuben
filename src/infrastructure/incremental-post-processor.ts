@@ -1,143 +1,98 @@
-import { IStreamEvaluationResult, TStopTokenRule } from '../domain/truncation-types';
+import { TStopTokenRule, IStreamEvaluationResult } from '../domain/truncation-types';
 
-const STOP_SEQUENCES: string[] = [
+const DEFAULT_STOP_SEQUENCES: readonly string[] = [
     '\nfunction ',
     '\nclass ',
-    '\nif ',
-    '\nfor ',
-    '\nwhile ',
-    '\nswitch ',
-    '\ntry ',
-    '\ncatch ',
-    '\nfinally ',
     '\nconst ',
-    '\nlet ',
-    '\nvar ',
-    '\nimport ',
     '\nexport ',
-    '\nreturn ',
-    '\n}\n',
-];
-
-const OPEN_BRACKETS = '([{';
-const CLOSE_BRACKETS = ')]}';
+    '\ninterface ',
+    '\ntype ',
+    '\n\n',
+] as const;
 
 export class IncrementalPostProcessor {
+    private readonly stopSequences: readonly string[];
+
+    constructor(customStopSequences?: readonly string[]) {
+        this.stopSequences = customStopSequences ?? DEFAULT_STOP_SEQUENCES;
+    }
 
     evaluate(
         accumulatedText: string,
         referenceSuffix: string,
-        maxTokens: number = 24,
     ): IStreamEvaluationResult {
-        const trimmed = accumulatedText.trimEnd();
-        if (!trimmed) {
-            return { shouldStop: false, reason: undefined, stopOffset: 0, accumulatedText };
+        if (accumulatedText.length === 0) {
+            return { shouldStop: false, rule: null, cleanedText: '' };
         }
 
-        const bracketResult = this.evaluateBracketMatch(trimmed, referenceSuffix);
+        const trimmedSuffix = referenceSuffix.trimStart();
+
+        const bracketResult = this.evaluateBracketMatch(accumulatedText, trimmedSuffix);
         if (bracketResult.shouldStop) {
             return bracketResult;
         }
 
-        const collisionResult = this.evaluateSiblingCollision(accumulatedText, referenceSuffix);
+        const collisionResult = this.evaluateSiblingCollision(accumulatedText);
         if (collisionResult.shouldStop) {
             return collisionResult;
         }
 
-        const tokenCount = this.estimateTokens(trimmed);
-        if (tokenCount >= maxTokens) {
-            return {
-                shouldStop: true,
-                reason: 'max_tokens',
-                stopOffset: trimmed.length,
-                accumulatedText: trimmed,
-            };
-        }
-
-        return { shouldStop: false, reason: undefined, stopOffset: 0, accumulatedText: trimmed };
+        return { shouldStop: false, rule: null, cleanedText: accumulatedText };
     }
 
-    private evaluateBracketMatch(text: string, suffix: string): IStreamEvaluationResult {
-        const textOpen = this.countBrackets(text, OPEN_BRACKETS);
-        const textClose = this.countBrackets(text, CLOSE_BRACKETS);
-
-        if (textClose <= textOpen) {
-            return { shouldStop: false, reason: undefined, stopOffset: 0, accumulatedText: text };
+    private evaluateBracketMatch(text: string, trimmedSuffix: string): IStreamEvaluationResult {
+        if (!trimmedSuffix.startsWith('}')) {
+            return { shouldStop: false, rule: null, cleanedText: text };
         }
 
-        const suffixOpen = this.countBrackets(suffix, OPEN_BRACKETS);
-        const suffixClose = this.countBrackets(suffix, CLOSE_BRACKETS);
+        const openCount = text.split('{').length - 1;
+        const closeCount = text.split('}').length - 1;
 
-        const totalOpen = textOpen + suffixOpen;
-        const totalClose = textClose + suffixClose;
-
-        if (totalClose <= totalOpen) {
-            return { shouldStop: false, reason: undefined, stopOffset: 0, accumulatedText: text };
+        if (closeCount <= openCount) {
+            return { shouldStop: false, rule: null, cleanedText: text };
         }
 
-        const excessClose = totalClose - totalOpen;
-        let stopOffset = text.length;
-        let excessFound = 0;
-        for (let i = text.length - 1; i >= 0; i--) {
-            const ch = text[i];
-            if (CLOSE_BRACKETS.includes(ch)) {
-                excessFound++;
-                if (excessFound === excessClose) {
-                    stopOffset = i;
+        const excessClose = closeCount - openCount;
+        let foundExcess = 0;
+        let firstExcessIndex = -1;
+
+        for (let i = 0; i < text.length; i++) {
+            if (text[i] === '}') {
+                foundExcess++;
+                if (foundExcess === openCount + 1) {
+                    firstExcessIndex = i;
                     break;
                 }
             }
         }
 
+        if (firstExcessIndex === -1) {
+            return { shouldStop: false, rule: null, cleanedText: text };
+        }
+
+        const cleanedText = text.substring(0, firstExcessIndex).trimEnd();
+
         return {
             shouldStop: true,
-            reason: 'bracket_match',
-            stopOffset,
-            accumulatedText: text.slice(0, stopOffset),
+            rule: 'bracket_match',
+            cleanedText,
         };
     }
 
-    private evaluateSiblingCollision(text: string, suffix: string): IStreamEvaluationResult {
-        for (const seq of STOP_SEQUENCES) {
-            if (text.endsWith(seq)) {
-                const suffixTrimmed = suffix.trimStart();
-                const seqTrimmed = seq.trimStart();
-                if (suffixTrimmed.startsWith(seqTrimmed) || suffixTrimmed.startsWith(seqTrimmed.slice(0, -1))) {
-                    const seqStartIndex = text.length - seq.length;
-                    if (seq.startsWith('\n')) {
-                        const stopOffset = seqStartIndex + 1;
-                        return {
-                            shouldStop: true,
-                            reason: 'sibling_collision',
-                            stopOffset,
-                            accumulatedText: text.slice(0, stopOffset),
-                        };
-                    }
-                    return {
-                        shouldStop: true,
-                        reason: 'sibling_collision',
-                        stopOffset: seqStartIndex,
-                        accumulatedText: text.slice(0, seqStartIndex),
-                    };
-                }
+    private evaluateSiblingCollision(text: string): IStreamEvaluationResult {
+        for (const seq of this.stopSequences) {
+            const idx = text.indexOf(seq);
+            if (idx !== -1) {
+                const cleanedText = text.substring(0, idx).trimEnd();
+                return {
+                    shouldStop: true,
+                    rule: 'sibling_collision',
+                    cleanedText,
+                };
             }
         }
 
-        return { shouldStop: false, reason: undefined, stopOffset: 0, accumulatedText: text };
-    }
-
-    private countBrackets(text: string, brackets: string): number {
-        let count = 0;
-        for (const ch of text) {
-            if (brackets.includes(ch)) {
-                count++;
-            }
-        }
-        return count;
-    }
-
-    private estimateTokens(text: string): number {
-        return Math.ceil(text.length / 4);
+        return { shouldStop: false, rule: null, cleanedText: text };
     }
 }
 

@@ -1,136 +1,100 @@
-import { IFimPayload, ISyntaxBounds } from '../domain/types';
-import { ITruncationBudget, ITruncationResult, ITruncationMetrics, DEFAULT_TRUNCATION_BUDGET } from '../domain/truncation-types';
+import { IFimPayload } from '../domain/types';
+import {
+    ITruncationBudget,
+    ITruncationResult,
+    ITruncationMetrics,
+    DEFAULT_TRUNCATION_BUDGET,
+} from '../domain/truncation-types';
 
 export class ActiveTruncator {
+    private readonly budget: ITruncationBudget;
+    private readonly availableTokens: number;
+    private readonly maxPrefixChars: number;
+    private readonly maxSuffixChars: number;
+
+    constructor(budget: ITruncationBudget = DEFAULT_TRUNCATION_BUDGET) {
+        this.budget = budget;
+        this.availableTokens = budget.maxContextTokens
+            - budget.generationReserve
+            - budget.sentinelOverhead
+            - budget.graphRagOverhead;
+        this.maxPrefixChars = Math.floor(this.availableTokens * budget.prefixRatio * budget.charToTokenRatio);
+        this.maxSuffixChars = Math.floor(this.availableTokens * budget.suffixRatio * budget.charToTokenRatio);
+    }
 
     truncatePayload(
         payload: IFimPayload,
-        budget: ITruncationBudget = DEFAULT_TRUNCATION_BUDGET,
-        bounds: ISyntaxBounds | undefined = undefined,
-    ): { result: ITruncationResult; metrics: ITruncationMetrics } {
-        const prefixLines = payload.prefix.split('\n');
-        const suffixLines = payload.suffix.split('\n');
+        blockType: string,
+    ): ITruncationResult {
+        const originalCharCount = payload.prefix.length + payload.suffix.length;
+        const prefixTokens = Math.ceil(payload.prefix.length / this.budget.charToTokenRatio);
+        const suffixTokens = Math.ceil(payload.suffix.length / this.budget.charToTokenRatio);
+        const totalTokens = prefixTokens + suffixTokens;
 
-        const preTruncationChars = payload.prefix.length + payload.suffix.length;
-        const preTruncationLines = prefixLines.length + suffixLines.length;
-
-        const tokenEstimate = this.estimateTokens(payload.prefix) + this.estimateTokens(payload.suffix);
-        const maxPayloadTokens = budget.maxContextTokens - budget.reservedCompletionTokens;
-
-        let prefix = payload.prefix;
-        let suffix = payload.suffix;
-        let truncatedPrefix = false;
-        let truncatedSuffix = false;
-        let reason: string | undefined = undefined;
-
-        if (tokenEstimate <= maxPayloadTokens && prefixLines.length <= budget.maxPrefixLines && suffixLines.length <= budget.maxSuffixLines) {
+        if (totalTokens <= this.availableTokens) {
             return {
-                result: {
-                    prefix,
-                    suffix,
-                    originalPrefixLength: payload.prefix.length,
-                    originalSuffixLength: payload.suffix.length,
-                    truncatedPrefix: false,
-                    truncatedSuffix: false,
-                    truncatedTokenEstimate: tokenEstimate,
-                },
+                truncatedPayload: payload,
                 metrics: {
-                    preTruncationChars,
-                    postTruncationChars: preTruncationChars,
-                    preTruncationLines,
-                    postTruncationLines: preTruncationLines,
-                    wasAltered: false,
-                    reason: undefined,
+                    originalCharCount,
+                    truncatedCharCount: originalCharCount,
+                    estimatedOriginalTokens: totalTokens,
+                    estimatedTruncatedTokens: totalTokens,
+                    prefixWasTruncated: false,
+                    suffixWasTruncated: false,
+                    truncationApplied: false,
                 },
             };
         }
 
-        const isImportBlock = bounds?.blockType === 'import_declaration';
+        const preserveFullPrefix = blockType === 'import_statement' || blockType === 'import_declaration';
 
-        if (prefixLines.length > budget.maxPrefixLines) {
-            if (isImportBlock) {
-                reason = 'import_block_prefix_preserved';
+        let truncatedPrefix: string;
+        let prefixWasTruncated: boolean;
+
+        if (preserveFullPrefix || payload.prefix.length <= this.maxPrefixChars) {
+            truncatedPrefix = payload.prefix;
+            prefixWasTruncated = false;
+        } else {
+            const targetCutOffset = payload.prefix.length - this.maxPrefixChars;
+            const lineBreakIndex = payload.prefix.indexOf('\n', targetCutOffset);
+            if (lineBreakIndex !== -1) {
+                truncatedPrefix = payload.prefix.substring(lineBreakIndex + 1);
             } else {
-                prefix = prefixLines.slice(prefixLines.length - budget.maxPrefixLines).join('\n');
-                truncatedPrefix = true;
-                reason = 'prefix_exceeded_max_lines';
+                truncatedPrefix = payload.prefix.substring(targetCutOffset);
             }
+            prefixWasTruncated = true;
         }
 
-        if (suffixLines.length > budget.maxSuffixLines) {
-            suffix = suffixLines.slice(0, budget.maxSuffixLines).join('\n');
-            truncatedSuffix = true;
-            if (!reason) { reason = 'suffix_exceeded_max_lines'; }
+        let truncatedSuffix: string;
+        let suffixWasTruncated: boolean;
+
+        if (payload.suffix.length <= this.maxSuffixChars) {
+            truncatedSuffix = payload.suffix;
+            suffixWasTruncated = false;
+        } else {
+            truncatedSuffix = payload.suffix.substring(0, this.maxSuffixChars);
+            suffixWasTruncated = true;
         }
 
-        const currentEstimate = this.estimateTokens(prefix) + this.estimateTokens(suffix);
-        if (currentEstimate > maxPayloadTokens) {
-            const excessChars = Math.ceil((currentEstimate - maxPayloadTokens) * 4);
-            if (!truncatedPrefix && !isImportBlock) {
-                const truncated = this.truncateFromStart(prefix, excessChars);
-                prefix = truncated;
-                truncatedPrefix = true;
-                reason = 'prefix_truncated_by_token_budget';
-            } else {
-                const truncated = this.truncateFromEnd(suffix, excessChars);
-                suffix = truncated;
-                truncatedSuffix = true;
-                if (!reason) { reason = 'suffix_truncated_by_token_budget'; }
-            }
-        }
-
-        if (!truncatedPrefix && !truncatedSuffix && this.estimateTokens(prefix) + this.estimateTokens(suffix) > maxPayloadTokens) {
-            const excessChars = Math.ceil((this.estimateTokens(prefix) + this.estimateTokens(suffix) - maxPayloadTokens) * 4);
-            const truncated = this.truncateFromEnd(suffix, excessChars);
-            suffix = truncated;
-            truncatedSuffix = true;
-            if (!reason) { reason = 'suffix_truncated_by_token_budget'; }
-        }
-
-        const postTruncationChars = prefix.length + suffix.length;
-        const postTruncationLines = prefix.split('\n').length + suffix.split('\n').length;
-        const finalTokenEstimate = this.estimateTokens(prefix) + this.estimateTokens(suffix);
+        const finalCharCount = truncatedPrefix.length + truncatedSuffix.length;
+        const finalTokens = Math.ceil(finalCharCount / this.budget.charToTokenRatio);
 
         return {
-            result: {
-                prefix,
-                suffix,
-                originalPrefixLength: payload.prefix.length,
-                originalSuffixLength: payload.suffix.length,
-                truncatedPrefix,
-                truncatedSuffix,
-                truncatedTokenEstimate: finalTokenEstimate,
+            truncatedPayload: {
+                prefix: truncatedPrefix,
+                suffix: truncatedSuffix,
+                isSpmFormat: payload.isSpmFormat,
             },
             metrics: {
-                preTruncationChars,
-                postTruncationChars,
-                preTruncationLines,
-                postTruncationLines,
-                wasAltered: truncatedPrefix || truncatedSuffix,
-                reason,
+                originalCharCount,
+                truncatedCharCount: finalCharCount,
+                estimatedOriginalTokens: totalTokens,
+                estimatedTruncatedTokens: finalTokens,
+                prefixWasTruncated,
+                suffixWasTruncated,
+                truncationApplied: prefixWasTruncated || suffixWasTruncated,
             },
         };
-    }
-
-    private estimateTokens(text: string): number {
-        return Math.ceil(text.length / 4);
-    }
-
-    private truncateFromStart(text: string, excessChars: number): string {
-        if (excessChars >= text.length) {return '';}
-        const truncated = text.slice(excessChars);
-        const newlineIndex = truncated.indexOf('\n');
-        if (newlineIndex === -1) {return truncated;}
-        return truncated.slice(newlineIndex + 1);
-    }
-
-    private truncateFromEnd(text: string, excessChars: number): string {
-        if (excessChars >= text.length) {return '';}
-        const keepLength = text.length - excessChars;
-        const truncated = text.slice(0, keepLength);
-        const lastNewline = truncated.lastIndexOf('\n');
-        if (lastNewline === -1) {return truncated;}
-        return truncated.slice(0, lastNewline);
     }
 }
 
