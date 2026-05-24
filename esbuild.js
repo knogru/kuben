@@ -1,4 +1,6 @@
 const esbuild = require("esbuild");
+const fs = require("fs");
+const path = require("path");
 
 const production = process.argv.includes('--production');
 const watch = process.argv.includes('--watch');
@@ -23,6 +25,30 @@ const esbuildProblemMatcherPlugin = {
 	},
 };
 
+/**
+ * @type {import('esbuild').Plugin}
+ */
+const wasmCopyPlugin = {
+	name: 'wasm-copy',
+	setup(build) {
+		build.onEnd(() => {
+			const wasmFiles = [
+				'src/tree-sitter.wasm',
+				'src/tree-sitter-javascript.wasm',
+			];
+			for (const src of wasmFiles) {
+				const dest = path.join('dist', path.basename(src));
+				if (fs.existsSync(src)) {
+					fs.copyFileSync(src, dest);
+					console.log(`[wasm-copy] Copied ${src} → ${dest}`);
+				} else {
+					console.warn(`[wasm-copy] Missing: ${src}`);
+				}
+			}
+		});
+	},
+};
+
 async function main() {
 	const ctx = await esbuild.context({
 		entryPoints: [
@@ -35,11 +61,11 @@ async function main() {
 		sourcesContent: false,
 		platform: 'node',
 		outfile: 'dist/extension.js',
-		external: ['vscode'],
+		external: ['vscode', '*.wasm'],
 		logLevel: 'silent',
 		plugins: [
-			/* add to the end of plugins array */
 			esbuildProblemMatcherPlugin,
+			wasmCopyPlugin,
 		],
 	});
 	if (watch) {

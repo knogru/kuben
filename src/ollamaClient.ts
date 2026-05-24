@@ -17,7 +17,6 @@ export class OllamaClient {
   ) {}
 
   async generate(prompt: string): Promise<string | undefined> {
-    // create and track controller so callers can cancel
     if (this.abortController) {
       this.abortController.abort();
     }
@@ -30,7 +29,10 @@ export class OllamaClient {
       const res = await this.postJson(`${this.endpoint}/api/generate`, {
         model: this.model,
         prompt: prompt,
-        stream: false,
+        stream: true,
+        temperature: 0.0,
+        num_ctx: 1024,
+        raw: true,
       }, timeoutMs, controller.signal);
       const elapsed = Date.now() - start;
       console.debug(`OllamaClient.generate RTT: ${elapsed}ms`);
@@ -59,10 +61,9 @@ export class OllamaClient {
   async generateWithFIM(
     prefix: string,
     suffix: string,
-    maxTokens: number = 20
+    maxTokens: number = 24
   ): Promise<string | undefined> {
     const prompt = `<|fim_prefix|>${prefix}<|fim_suffix|>${suffix}<|fim_middle|>`;
-    // create and track controller so callers can cancel
     if (this.abortController) {
       this.abortController.abort();
     }
@@ -75,10 +76,11 @@ export class OllamaClient {
       const res = await this.postJson(`${this.endpoint}/api/generate`, {
         model: this.model,
         prompt: prompt,
-        stream: false,
+        stream: true,
         num_predict: maxTokens,
-        temperature: 0.3,
-        top_p: 0.9,
+        temperature: 0.0,
+        num_ctx: 1024,
+        raw: true,
       }, timeoutMs, controller.signal);
       const elapsed = Date.now() - start;
       console.debug(`OllamaClient.generateWithFIM RTT: ${elapsed}ms`);
@@ -115,6 +117,49 @@ export class OllamaClient {
     }
   }
 
+  async streamGenerate(
+    prompt: string,
+    body: Record<string, unknown>,
+    onToken: (token: string) => void,
+    onDone: () => void,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const timeoutMs = 60000;
+    const requestBody = { ...body, model: this.model, prompt, stream: true };
+
+    try {
+      await this.postJsonStream(
+        `${this.endpoint}/api/generate`,
+        requestBody,
+        timeoutMs,
+        signal,
+        (message) => {
+          if (!message) {return;}
+          if (typeof message === 'string') {
+            onToken(message);
+            return;
+          }
+          if (message.response) {
+            onToken(message.response);
+          }
+          if (message.done) {
+            onDone();
+          }
+        }
+      );
+    } catch (error) {
+      if (error instanceof Error) {
+        if (error.message === 'AbortError') {
+          console.debug('OllamaClient.streamGenerate: aborted');
+        } else {
+          console.error('OllamaClient.streamGenerate failed:', error.message);
+        }
+      } else {
+        console.error('OllamaClient.streamGenerate failed:', error);
+      }
+    }
+  }
+
   private cleanCompletion(response: string): string | undefined {
     const lines = response.split('\n');
     
@@ -124,27 +169,22 @@ export class OllamaClient {
     for (const line of lines) {
       const trimmed = line.trim();
 
-      // Pular linhas em branco antes do código começar
       if (!foundCode && trimmed === ''){
         continue;
       }
 
-      // Ignorar markdown code fences
       if (trimmed.startsWith('```')) {
         continue;
       }
 
-      // Detectar se a linha parece prosa (começa com letra maiúscula e termina com ponto)
       const isProse = /^[A-Z].*[.!?:]$/.test(trimmed);
       if (isProse && !foundCode) {
         continue;
       }
 
-      // A partir daqui é código
       foundCode = true;
       codeLines.push(line);
 
-      // Parar após 5 linhas de código
       if (codeLines.length >= 5) {
         break;
       }
@@ -152,7 +192,7 @@ export class OllamaClient {
 
     const result = codeLines.join('\n').trimEnd();
     return result || undefined;
-}
+  }
 
   private async postJson(urlStr: string, bodyObj: any, timeoutMs: number, signal?: AbortSignal) {
     return new Promise<{ ok: boolean; status: number; json: () => Promise<any> }>((resolve, reject) => {
@@ -210,7 +250,7 @@ export class OllamaClient {
     });
   }
 
-  async generateWithFIMStream(prefix: string, suffix: string, onToken: (token: string) => void, maxTokens: number = 20): Promise<void> {
+  async generateWithFIMStream(prefix: string, suffix: string, onToken: (token: string) => void, maxTokens: number = 24): Promise<void> {
     const prompt = `<|fim_prefix|>${prefix}<|fim_suffix|>${suffix}<|fim_middle|>`;
     if (this.abortController) {
       this.abortController.abort();
@@ -227,13 +267,14 @@ export class OllamaClient {
           prompt: prompt,
           stream: true,
           num_predict: maxTokens,
-          temperature: 0.3,
-          top_p: 0.9,
+          temperature: 0.0,
+          num_ctx: 1024,
+          raw: true,
         },
         timeoutMs,
         controller.signal,
         (message) => {
-          if (!message) return;
+          if (!message) {return;}
           if (typeof message === 'string') {
             onToken(message);
             return;
@@ -246,7 +287,7 @@ export class OllamaClient {
     } catch (error) {
       if (error instanceof Error) {
         if (error.message === 'AbortError') {
-          console.error('FIM streaming generation failed: Request timeout (30s)');
+          console.error('FIM streaming generation failed: Request timeout');
         } else {
           console.error('FIM streaming generation failed:', error.message);
         }
@@ -289,11 +330,11 @@ export class OllamaClient {
           const flushBuffer = (isFinal = false) => {
             while (true) {
               const newlineIndex = buffer.indexOf('\n');
-              if (newlineIndex === -1) break;
+              if (newlineIndex === -1) {break;}
 
               const line = buffer.slice(0, newlineIndex).trim();
               buffer = buffer.slice(newlineIndex + 1);
-              if (!line) continue;
+              if (!line) {continue;}
 
               let payload = line;
               if (payload.startsWith('data:')) {

@@ -8,13 +8,13 @@ export class SymbolIndexer {
   async indexDocument(document: vscode.TextDocument) {
     try {
       const symbols = (await vscode.commands.executeCommand('vscode.executeDocumentSymbolProvider', document.uri)) as vscode.DocumentSymbol[] | undefined;
-      if (!symbols) return;
+      if (!symbols) {return;}
 
       const locations: SymbolLocation[] = [];
       const walk = (symList: vscode.DocumentSymbol[]) => {
         for (const s of symList) {
           locations.push({ name: s.name, uri: document.uri, range: s.range });
-          if (s.children && s.children.length) walk(s.children);
+          if (s.children && s.children.length) {walk(s.children);}
         }
       };
       walk(symbols);
